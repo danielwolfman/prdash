@@ -210,6 +210,46 @@ func TestCurrentWorkflowRunsWithJobs(t *testing.T) {
 	}
 }
 
+func TestGetRetriesTransientGitHubFailure(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
+			return
+		}
+		writeJSON(t, w, map[string]any{"workflow_runs": []map[string]any{}})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token", WithBaseURLs(server.URL, server.URL+"/graphql"))
+	_, err := client.WorkflowRunsForSHA(context.Background(), "octo-org", "prdash", "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestGetDoesNotRetryPermissionFailure(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		http.Error(w, `{"message":"Forbidden"}`, http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token", WithBaseURLs(server.URL, server.URL+"/graphql"))
+	_, err := client.WorkflowRunsForSHA(context.Background(), "octo-org", "prdash", "abc123")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
 func writeJSON(t *testing.T, w http.ResponseWriter, payload any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")

@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const defaultUserAgent = "prdash"
+const maxAttempts = 3
 
 type Client struct {
 	token       string
@@ -62,19 +66,7 @@ func (c *Client) graphql(ctx context.Context, query string, variables map[string
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.graphQLURL, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	c.setHeaders(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	data, err := readResponse(resp)
+	data, err := c.doWithRetry(ctx, http.MethodPost, c.graphQLURL, body)
 	if err != nil {
 		return err
 	}
@@ -95,19 +87,7 @@ func (c *Client) get(ctx context.Context, path string, values url.Values, out an
 		endpoint += "?" + values.Encode()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return err
-	}
-	c.setHeaders(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	data, err := readResponse(resp)
+	data, err := c.doWithRetry(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err
 	}
@@ -115,6 +95,48 @@ func (c *Client) get(ctx context.Context, path string, values url.Values, out an
 		return nil
 	}
 	return json.Unmarshal(data, out)
+}
+
+func (c *Client) doWithRetry(ctx context.Context, method, endpoint string, body []byte) ([]byte, error) {
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		reqBody := io.Reader(nil)
+		if body != nil {
+			reqBody = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, endpoint, reqBody)
+		if err != nil {
+			return nil, err
+		}
+		c.setHeaders(req)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			if attempt == maxAttempts {
+				return nil, err
+			}
+			if err := sleepRetry(ctx, retryDelay(attempt, nil)); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		data, err := readResponse(resp)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+
+		var apiErr apiError
+		if !errors.As(err, &apiErr) || !apiErr.Transient() || attempt == maxAttempts {
+			return nil, err
+		}
+		if err := sleepRetry(ctx, retryDelay(attempt, resp)); err != nil {
+			return nil, err
+		}
+	}
+	return nil, lastErr
 }
 
 func (c *Client) setHeaders(req *http.Request) {
@@ -127,6 +149,7 @@ func (c *Client) setHeaders(req *http.Request) {
 }
 
 func readResponse(resp *http.Response) ([]byte, error) {
+	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
@@ -134,7 +157,53 @@ func readResponse(resp *http.Response) ([]byte, error) {
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return data, nil
 	}
-	return nil, fmt.Errorf("github api %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	return nil, apiError{
+		StatusCode: resp.StatusCode,
+		Status:     resp.Status,
+		Body:       strings.TrimSpace(string(data)),
+	}
+}
+
+type apiError struct {
+	StatusCode int
+	Status     string
+	Body       string
+}
+
+func (e apiError) Error() string {
+	if e.Body == "" {
+		return "github api " + e.Status
+	}
+	return fmt.Sprintf("github api %s: %s", e.Status, e.Body)
+}
+
+func (e apiError) Transient() bool {
+	return e.StatusCode == http.StatusTooManyRequests ||
+		e.StatusCode == http.StatusBadGateway ||
+		e.StatusCode == http.StatusServiceUnavailable ||
+		e.StatusCode == http.StatusGatewayTimeout
+}
+
+func retryDelay(attempt int, resp *http.Response) time.Duration {
+	if resp != nil {
+		if retryAfter := strings.TrimSpace(resp.Header.Get("Retry-After")); retryAfter != "" {
+			if seconds, err := strconv.Atoi(retryAfter); err == nil && seconds > 0 {
+				return time.Duration(seconds) * time.Second
+			}
+		}
+	}
+	return time.Duration(attempt*250) * time.Millisecond
+}
+
+func sleepRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 type graphqlRequest struct {

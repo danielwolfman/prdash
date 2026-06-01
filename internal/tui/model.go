@@ -109,15 +109,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		switch msg.Type {
 		case tea.MouseWheelDown:
-			if m.cursor < len(m.dashboard.Rows)-1 {
-				m.cursor++
-				m.keepCursorVisible()
-			}
+			m.scrollDown()
 		case tea.MouseWheelUp:
-			if m.cursor > 0 {
-				m.cursor--
-				m.keepCursorVisible()
-			}
+			m.scrollUp()
 		case tea.MouseLeft:
 			m.focusApproximateRow(msg.Y)
 		}
@@ -209,9 +203,18 @@ func (m Model) loadingLine() string {
 
 func (m Model) renderRows(maxLines int) []string {
 	var lines []string
-	for idx := m.offset; idx < len(m.dashboard.Rows) && len(lines) < maxLines; idx++ {
+	skipped := 0
+	for idx := 0; idx < len(m.dashboard.Rows) && len(lines) < maxLines; idx++ {
 		rowLines := m.renderRow(idx, m.dashboard.Rows[idx])
+		if skipped+len(rowLines) <= m.offset {
+			skipped += len(rowLines)
+			continue
+		}
 		for _, line := range rowLines {
+			if skipped < m.offset {
+				skipped++
+				continue
+			}
 			if len(lines) >= maxLines {
 				break
 			}
@@ -496,21 +499,32 @@ func samePR(a, b model.PullRequest) bool {
 }
 
 func (m *Model) keepCursorVisible() {
+	if len(m.dashboard.Rows) == 0 {
+		m.cursor = 0
+		m.offset = 0
+		return
+	}
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
 	if m.cursor >= len(m.dashboard.Rows) {
 		m.cursor = max(0, len(m.dashboard.Rows)-1)
 	}
-	bodyRows := max(1, (m.height-4)/2)
-	if m.cursor < m.offset {
-		m.offset = m.cursor
+	bodyLines := max(1, m.height-4)
+	start := m.rowStartLine(m.cursor)
+	end := start + len(m.renderRow(m.cursor, m.dashboard.Rows[m.cursor]))
+	if start < m.offset {
+		m.offset = start
 	}
-	if m.cursor >= m.offset+bodyRows {
-		m.offset = m.cursor - bodyRows + 1
+	if end > m.offset+bodyLines {
+		m.offset = end - bodyLines
 	}
 	if m.offset < 0 {
 		m.offset = 0
+	}
+	maxOffset := max(0, m.totalRenderedLines()-bodyLines)
+	if m.offset > maxOffset {
+		m.offset = maxOffset
 	}
 }
 
@@ -518,12 +532,64 @@ func (m *Model) focusApproximateRow(y int) {
 	if y <= 0 || len(m.dashboard.Rows) == 0 {
 		return
 	}
-	idx := m.offset + (y-1)/2
-	if idx >= len(m.dashboard.Rows) {
-		idx = len(m.dashboard.Rows) - 1
+	targetLine := m.offset + y - 1
+	line := 0
+	for idx := range m.dashboard.Rows {
+		line += len(m.renderRow(idx, m.dashboard.Rows[idx]))
+		if targetLine < line {
+			m.cursor = idx
+			m.keepCursorVisible()
+			return
+		}
 	}
-	m.cursor = idx
+	m.cursor = len(m.dashboard.Rows) - 1
 	m.keepCursorVisible()
+}
+
+func (m *Model) scrollDown() {
+	if len(m.dashboard.Rows) == 0 {
+		return
+	}
+	bodyLines := max(1, m.height-4)
+	maxOffset := max(0, m.totalRenderedLines()-bodyLines)
+	m.offset = min(maxOffset, m.offset+3)
+	m.cursor = m.firstVisibleRow()
+}
+
+func (m *Model) scrollUp() {
+	if len(m.dashboard.Rows) == 0 {
+		return
+	}
+	m.offset = max(0, m.offset-3)
+	m.cursor = m.firstVisibleRow()
+}
+
+func (m Model) firstVisibleRow() int {
+	line := 0
+	for idx := range m.dashboard.Rows {
+		next := line + len(m.renderRow(idx, m.dashboard.Rows[idx]))
+		if next > m.offset {
+			return idx
+		}
+		line = next
+	}
+	return max(0, len(m.dashboard.Rows)-1)
+}
+
+func (m Model) rowStartLine(row int) int {
+	line := 0
+	for idx := 0; idx < row && idx < len(m.dashboard.Rows); idx++ {
+		line += len(m.renderRow(idx, m.dashboard.Rows[idx]))
+	}
+	return line
+}
+
+func (m Model) totalRenderedLines() int {
+	total := 0
+	for idx := range m.dashboard.Rows {
+		total += len(m.renderRow(idx, m.dashboard.Rows[idx]))
+	}
+	return total
 }
 
 func (m Model) tick() tea.Cmd {

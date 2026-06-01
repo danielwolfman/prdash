@@ -94,6 +94,35 @@ func TestKeyboardNavigationAndExpansion(t *testing.T) {
 	}
 }
 
+func TestMouseWheelScrollsByRenderedLines(t *testing.T) {
+	dashboard := sampleDashboard("unicode")
+	for i := 0; i < 6; i++ {
+		row := dashboard.Rows[0]
+		row.PR.Number = 100 + i
+		row.PR.Title = "Extra PR"
+		dashboard.Rows = append(dashboard.Rows, row)
+	}
+	m := New(dashboard)
+	m.width = 100
+	m.height = 10
+
+	for i := 0; i < 4; i++ {
+		updated, _ := m.Update(tea.MouseMsg{Type: tea.MouseWheelDown})
+		m = updated.(Model)
+	}
+	if m.offset == 0 {
+		t.Fatalf("expected mouse wheel to advance line offset")
+	}
+	if m.cursor == 0 {
+		t.Fatalf("expected cursor to follow first visible row")
+	}
+
+	view := stripANSI(m.View())
+	if strings.Contains(view, "octo-org/prdash#12") && !strings.Contains(view, "octo-org/prdash#100") {
+		t.Fatalf("view did not scroll into later rendered rows:\n%s", view)
+	}
+}
+
 func sampleDashboard(symbols string) Dashboard {
 	now := time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC)
 	return Dashboard{
