@@ -15,9 +15,11 @@ type LoadEvent struct {
 	ExcludedCount   int
 	Row             *Row
 	Done            bool
+	Closed          bool
 	Error           string
 	Message         string
 	SnapshotAt      time.Time
+	RefreshInterval time.Duration
 }
 
 type Dashboard struct {
@@ -30,11 +32,16 @@ type Dashboard struct {
 	Animations      bool
 	AnimationFPS    int
 	Loader          Loader
+	RefreshInterval time.Duration
+	StaleAfter      time.Duration
 }
 
 type Row struct {
-	PR         model.PullRequest
-	Runs       []model.WorkflowRun
-	FetchError string
-	Loading    bool
+	PR           model.PullRequest
+	Runs         []model.WorkflowRun
+	FetchError   string
+	Loading      bool
+	LastFetched  time.Time
+	ChangedUntil time.Time
+	ChangeState  model.CheckState
 }

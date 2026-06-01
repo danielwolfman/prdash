@@ -95,21 +95,41 @@ func dashboardLoader(configPath string, limitOverride int) tui.Loader {
 		if searchLimit > 100 {
 			searchLimit = 100
 		}
-		events <- tui.LoadEvent{User: status.Account, Message: fmt.Sprintf("discovering up to %d authored PRs", cfg.Limits.MaxVisiblePRs), SnapshotAt: time.Now()}
-		prs, err := client.SearchAuthoredOpenPRs(ctx, searchLimit)
-		if err != nil {
-			events <- tui.LoadEvent{Error: err.Error(), Done: true}
-			return
-		}
+		for {
+			events <- tui.LoadEvent{User: status.Account, Message: fmt.Sprintf("discovering up to %d authored PRs", cfg.Limits.MaxVisiblePRs), SnapshotAt: time.Now()}
+			prs, err := client.SearchAuthoredOpenPRs(ctx, searchLimit)
+			if err != nil {
+				events <- tui.LoadEvent{Error: err.Error(), Done: true}
+				return
+			}
 
-		rows, excluded := prepareRows(prs, cfg)
-		events <- tui.LoadEvent{TotalDiscovered: len(prs), ExcludedCount: excluded, Message: fmt.Sprintf("loading jobs for %d PRs", len(rows))}
-		for i := range rows {
-			row := rows[i]
-			events <- tui.LoadEvent{Row: &row, TotalDiscovered: len(prs), ExcludedCount: excluded}
+			rows, excluded := prepareRows(prs, cfg)
+			refreshInterval := calculateRefreshInterval(cfg, len(rows))
+			events <- tui.LoadEvent{
+				TotalDiscovered: len(prs),
+				ExcludedCount:   excluded,
+				Message:         fmt.Sprintf("refreshing jobs for %d PRs", len(rows)),
+				RefreshInterval: refreshInterval,
+				SnapshotAt:      time.Now(),
+			}
+			for i := range rows {
+				row := rows[i]
+				events <- tui.LoadEvent{Row: &row, TotalDiscovered: len(prs), ExcludedCount: excluded, RefreshInterval: refreshInterval}
+			}
+			streamJobFetches(ctx, client, rows, cfg.Limits.MaxConcurrentRequests, len(prs), excluded, events)
+			events <- tui.LoadEvent{
+				Done:            true,
+				TotalDiscovered: len(prs),
+				ExcludedCount:   excluded,
+				SnapshotAt:      time.Now(),
+				RefreshInterval: refreshInterval,
+				Message:         fmt.Sprintf("loaded %d PRs", len(rows)),
+			}
+
+			if err := sleepContext(ctx, refreshInterval); err != nil {
+				return
+			}
 		}
-		streamJobFetches(ctx, client, rows, cfg.Limits.MaxConcurrentRequests, len(prs), excluded, events)
-		events <- tui.LoadEvent{Done: true, TotalDiscovered: len(prs), ExcludedCount: excluded, SnapshotAt: time.Now()}
 	}
 }
 
@@ -171,6 +191,43 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func calculateRefreshInterval(cfg config.Config, visibleRows int) time.Duration {
+	minSeconds := cfg.Limits.MinRefreshIntervalSecond
+	if minSeconds <= 0 {
+		minSeconds = 30
+	}
+	maxSeconds := cfg.Limits.MaxRefreshIntervalSecond
+	if maxSeconds <= 0 {
+		maxSeconds = 300
+	}
+	budgetPercent := cfg.Limits.TargetRateBudgetPercent
+	if budgetPercent <= 0 || budgetPercent > 100 {
+		budgetPercent = 60
+	}
+
+	estimatedRequests := 2 + visibleRows*3
+	allowedPerHour := 5000 * budgetPercent / 100
+	calculatedSeconds := estimatedRequests * 3600 / maxInt(1, allowedPerHour)
+	if calculatedSeconds < minSeconds {
+		calculatedSeconds = minSeconds
+	}
+	if calculatedSeconds > maxSeconds {
+		calculatedSeconds = maxSeconds
+	}
+	return time.Duration(calculatedSeconds) * time.Second
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func configCommand(configPath *string) *cobra.Command {

@@ -79,6 +79,16 @@ func relativeTime(then, now time.Time) string {
 	}
 }
 
+func shortDuration(d time.Duration) string {
+	if d < time.Minute {
+		return plural(int(d.Seconds()), "s")
+	}
+	if d < time.Hour {
+		return plural(int(d.Minutes()), "m")
+	}
+	return plural(int(d.Hours()), "h")
+}
+
 func plural(value int, unit string) string {
 	if value <= 0 {
 		value = 1

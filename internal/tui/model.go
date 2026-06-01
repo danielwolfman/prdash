@@ -123,7 +123,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case LoadEvent:
 		m.applyLoadEvent(msg)
-		if !msg.Done && msg.Error == "" {
+		if !msg.Closed && msg.Error == "" {
 			return m, m.waitForLoadEvent()
 		}
 	}
@@ -171,7 +171,7 @@ func (m Model) header() string {
 	}
 	state := "live loading"
 	if !m.loading {
-		state = "snapshot"
+		state = "live"
 	}
 	text := fmt.Sprintf(" prdash · %s · %s%s · %s %s ",
 		valueOr(m.dashboard.User, "unknown"),
@@ -191,6 +191,8 @@ func (m Model) footer() string {
 	status := m.loadText
 	if m.loadError != "" {
 		status = "load error: " + m.loadError
+	} else if m.dashboard.RefreshInterval > 0 && !m.loading {
+		status = fmt.Sprintf("%s · refresh %s", status, shortDuration(m.dashboard.RefreshInterval))
 	}
 	text := fmt.Sprintf(" ↑/↓ j/k move · enter expand · q quit · symbols %s · %s ", mode, status)
 	return m.styles.footer.Width(max(1, m.width)).Render(fitPlain(text, max(1, m.width)))
@@ -229,18 +231,30 @@ func (m Model) renderRow(index int, row Row) []string {
 	expanded := m.expanded[index]
 	jobs := allJobs(row.Runs)
 	summary := model.SummarizeJobs(jobs)
+	stale := m.rowStale(row)
 
 	marker := " "
 	if focused {
 		marker = m.symbols.focus
+	} else if stale {
+		marker = m.symbols.stale
 	}
 
 	titleWidth := clamp(m.width-95, 18, 56)
 	title := fitPlain(row.PR.Title, titleWidth)
 	badges := m.badges(row)
 	summaryText := m.summary(summary, row.FetchError)
-	updated := relativeTime(row.PR.UpdatedAt, m.now)
-	heading := fmt.Sprintf("%s %s#%d %-*s %s %s updated %s",
+	statusSuffix := fmt.Sprintf("updated %s", relativeTime(row.PR.UpdatedAt, m.now))
+	if stale {
+		statusSuffix += " " + m.styles.stale.Render("stale")
+	}
+	if m.now.Before(row.ChangedUntil) {
+		statusSuffix += " " + m.styles.forState(row.ChangeState).Render("changed")
+	}
+	if !row.LastFetched.IsZero() {
+		statusSuffix += " checked " + relativeTime(row.LastFetched, m.now)
+	}
+	heading := fmt.Sprintf("%s %s#%d %-*s %s %s %s",
 		marker,
 		row.PR.RepoFullName,
 		row.PR.Number,
@@ -248,10 +262,12 @@ func (m Model) renderRow(index int, row Row) []string {
 		title,
 		badges,
 		summaryText,
-		updated,
+		statusSuffix,
 	)
 	if focused {
 		heading = m.styles.focused.Render(heading)
+	} else if stale {
+		heading = m.styles.stale.Render(heading)
 	} else {
 		heading = m.styles.row.Render(heading)
 	}
@@ -446,7 +462,7 @@ func (m Model) waitForLoadEvent() tea.Cmd {
 	return func() tea.Msg {
 		event, ok := <-events
 		if !ok {
-			return LoadEvent{Done: true}
+			return LoadEvent{Done: true, Closed: true}
 		}
 		return event
 	}
@@ -460,6 +476,12 @@ func (m *Model) applyLoadEvent(event LoadEvent) {
 		m.dashboard.SnapshotAt = event.SnapshotAt
 		m.now = event.SnapshotAt
 	}
+	if event.RefreshInterval > 0 {
+		m.dashboard.RefreshInterval = event.RefreshInterval
+		if m.dashboard.StaleAfter == 0 {
+			m.dashboard.StaleAfter = event.RefreshInterval * 2
+		}
+	}
 	if event.TotalDiscovered > 0 {
 		m.dashboard.TotalDiscovered = event.TotalDiscovered
 	}
@@ -468,16 +490,20 @@ func (m *Model) applyLoadEvent(event LoadEvent) {
 		m.loadText = event.Message
 	}
 	if event.Row != nil {
+		row := *event.Row
+		if row.LastFetched.IsZero() && !row.Loading {
+			row.LastFetched = m.now
+		}
 		replaced := false
 		for i := range m.dashboard.Rows {
-			if samePR(m.dashboard.Rows[i].PR, event.Row.PR) {
-				m.dashboard.Rows[i] = *event.Row
+			if samePR(m.dashboard.Rows[i].PR, row.PR) {
+				m.dashboard.Rows[i] = m.mergeRowState(m.dashboard.Rows[i], row)
 				replaced = true
 				break
 			}
 		}
 		if !replaced {
-			m.dashboard.Rows = append(m.dashboard.Rows, *event.Row)
+			m.dashboard.Rows = append(m.dashboard.Rows, row)
 		}
 		m.loadText = fmt.Sprintf("loaded %d/%d PRs", len(m.dashboard.Rows), max(m.dashboard.TotalDiscovered, len(m.dashboard.Rows)))
 	}
@@ -492,6 +518,40 @@ func (m *Model) applyLoadEvent(event LoadEvent) {
 		}
 	}
 	m.keepCursorVisible()
+}
+
+func (m Model) mergeRowState(old, next Row) Row {
+	if next.Loading {
+		if !old.LastFetched.IsZero() {
+			next.LastFetched = old.LastFetched
+		}
+		next.Runs = old.Runs
+		next.FetchError = old.FetchError
+		next.ChangedUntil = old.ChangedUntil
+		next.ChangeState = old.ChangeState
+		return next
+	}
+	oldSummary := model.SummarizeJobs(allJobs(old.Runs)).State
+	nextSummary := model.SummarizeJobs(allJobs(next.Runs)).State
+	if !old.LastFetched.IsZero() && oldSummary != nextSummary {
+		next.ChangedUntil = m.now.Add(8 * time.Second)
+		next.ChangeState = nextSummary
+	}
+	if next.LastFetched.IsZero() {
+		next.LastFetched = m.now
+	}
+	return next
+}
+
+func (m Model) rowStale(row Row) bool {
+	if row.Loading || row.LastFetched.IsZero() {
+		return false
+	}
+	staleAfter := m.dashboard.StaleAfter
+	if staleAfter <= 0 {
+		staleAfter = 2 * time.Minute
+	}
+	return m.now.Sub(row.LastFetched) > staleAfter
 }
 
 func samePR(a, b model.PullRequest) bool {

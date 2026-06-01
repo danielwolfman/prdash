@@ -16,7 +16,7 @@ This repository is private while v1 is being QAed. It should remain private unti
 
 ## Current Status
 
-Milestone 3 is complete: CLI skeleton, config defaults, GitHub CLI auth inspection, doctor checks, GitHub GraphQL PR discovery, REST Actions workflow/job fetching, status normalization, mocked API tests, and a dense TUI that opens immediately while PR/job data streams in. Live polling, adaptive scheduling, and rerun actions are not implemented yet.
+Milestone 4 is complete: CLI skeleton, config defaults, GitHub CLI auth inspection, doctor checks, GitHub GraphQL PR discovery, REST Actions workflow/job fetching, status normalization, mocked API tests, a dense TUI that opens immediately while PR/job data streams in, conservative live refresh, stale row markers, and change indicators. Rerun actions are not implemented yet.
 
 ## Development
 
@@ -27,4 +27,4 @@ go run ./cmd/prdash
 go run ./cmd/prdash --limit 3
 ```
 
-The default command opens the TUI immediately, discovers authored open PRs, then fills in current GitHub Actions jobs as background workers complete. Press `q` to quit. Use `--limit 3` for a faster local smoke test.
+The default command opens the TUI immediately, discovers authored open PRs, then fills in current GitHub Actions jobs as background workers complete. It refreshes on a conservative interval derived from the configured rate budget, marks stale rows, and highlights status changes. Press `q` to quit. Use `--limit 3` for a faster local smoke test.

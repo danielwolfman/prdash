@@ -76,6 +76,43 @@ func TestLoadEventsAppendAndUpdateRows(t *testing.T) {
 	}
 }
 
+func TestLoadEventsMarkChangedWhenSummaryChanges(t *testing.T) {
+	now := time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC)
+	m := New(Dashboard{SnapshotAt: now, Animations: false})
+	pr := model.PullRequest{RepoFullName: "octo-org/prdash", Number: 12}
+
+	m.applyLoadEvent(LoadEvent{SnapshotAt: now, Row: &Row{
+		PR:          pr,
+		LastFetched: now,
+		Runs:        []model.WorkflowRun{{Jobs: []model.Job{{State: model.CheckSuccess}}}},
+	}})
+	m.applyLoadEvent(LoadEvent{SnapshotAt: now.Add(time.Second), Row: &Row{
+		PR:   pr,
+		Runs: []model.WorkflowRun{{Jobs: []model.Job{{State: model.CheckFailure}}}},
+	}})
+
+	row := m.dashboard.Rows[0]
+	if row.ChangeState != model.CheckFailure || !row.ChangedUntil.After(m.now) {
+		t.Fatalf("expected failure change marker, got %+v", row)
+	}
+}
+
+func TestRowsBecomeStaleAfterRefreshWindow(t *testing.T) {
+	now := time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC)
+	m := New(sampleDashboard("unicode"))
+	m.dashboard.StaleAfter = time.Minute
+	m.dashboard.Rows[0].LastFetched = now.Add(-2 * time.Minute)
+	m.now = now
+
+	if !m.rowStale(m.dashboard.Rows[0]) {
+		t.Fatalf("expected row to be stale")
+	}
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "stale") {
+		t.Fatalf("view missing stale marker:\n%s", view)
+	}
+}
+
 func TestKeyboardNavigationAndExpansion(t *testing.T) {
 	m := New(sampleDashboard("unicode"))
 	m.width = 120
