@@ -7,7 +7,7 @@ import (
 	"github.com/danielwolfman/prdash/internal/model"
 )
 
-type Loader func(context.Context, chan<- LoadEvent)
+type Loader func(context.Context, <-chan struct{}, chan<- LoadEvent)
 
 type ActionExecutor func(context.Context, ActionRequest) ActionResult
 

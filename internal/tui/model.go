@@ -23,6 +23,7 @@ type Model struct {
 	styles     styles
 	symbols    symbols
 	events     chan LoadEvent
+	refresh    chan struct{}
 	loading    bool
 	loadText   string
 	loadError  string
@@ -48,6 +49,7 @@ func New(dashboard Dashboard) Model {
 		dashboard.AnimationFPS = 6
 	}
 	events := make(chan LoadEvent, 64)
+	refresh := make(chan struct{}, 1)
 	loading := dashboard.Loader != nil
 	loadText := "loading GitHub auth and PR list"
 	if len(dashboard.Rows) > 0 {
@@ -62,6 +64,7 @@ func New(dashboard Dashboard) Model {
 		styles:    newStyles(),
 		symbols:   chooseSymbols(dashboard.Symbols),
 		events:    events,
+		refresh:   refresh,
 		loading:   loading,
 		loadText:  loadText,
 	}
@@ -147,8 +150,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.actionText = "rerun failed: " + result.Error
 		} else if result.Message != "" {
 			m.actionText = result.Message
+			m.requestRefresh()
 		} else {
 			m.actionText = "rerun requested"
+			m.requestRefresh()
 		}
 	}
 	return m, nil
@@ -494,12 +499,25 @@ func (m Model) jobLine(display displayJob) string {
 func (m Model) startLoader() tea.Cmd {
 	loader := m.dashboard.Loader
 	events := m.events
+	refresh := m.refresh
 	return func() tea.Msg {
 		go func() {
-			loader(context.Background(), events)
+			loader(context.Background(), refresh, events)
 			close(events)
 		}()
 		return nil
+	}
+}
+
+func (m *Model) requestRefresh() {
+	if m.dashboard.Loader == nil || m.refresh == nil {
+		return
+	}
+	m.loading = true
+	m.loadText = "refresh requested after rerun"
+	select {
+	case m.refresh <- struct{}{}:
+	default:
 	}
 }
 

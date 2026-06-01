@@ -132,7 +132,7 @@ func actionExecutor(configPath string, flagEnabled bool) tui.ActionExecutor {
 }
 
 func dashboardLoader(configPath string, limitOverride int) tui.Loader {
-	return func(ctx context.Context, events chan<- tui.LoadEvent) {
+	return func(ctx context.Context, refresh <-chan struct{}, events chan<- tui.LoadEvent) {
 		path, err := config.ResolvePath(configPath)
 		if err != nil {
 			events <- tui.LoadEvent{Error: err.Error(), Done: true}
@@ -208,8 +208,12 @@ func dashboardLoader(configPath string, limitOverride int) tui.Loader {
 				Message:         fmt.Sprintf("loaded %d PRs", len(rows)),
 			}
 
-			if err := sleepContext(ctx, refreshInterval); err != nil {
+			refreshed, err := waitForRefresh(ctx, refresh, refreshInterval)
+			if err != nil {
 				return
+			}
+			if refreshed {
+				events <- tui.LoadEvent{Message: "hot refresh after rerun", SnapshotAt: time.Now(), RefreshInterval: refreshInterval}
 			}
 		}
 	}
@@ -310,14 +314,16 @@ func estimateRefreshRequests(visibleRows int) int {
 	return 2 + visibleRows*5
 }
 
-func sleepContext(ctx context.Context, d time.Duration) error {
+func waitForRefresh(ctx context.Context, refresh <-chan struct{}, d time.Duration) (bool, error) {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return false, ctx.Err()
+	case <-refresh:
+		return true, nil
 	case <-timer.C:
-		return nil
+		return false, nil
 	}
 }
 

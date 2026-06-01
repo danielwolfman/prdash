@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -36,5 +37,18 @@ func TestEstimateRefreshRequestsAllowsPaginatedJobLists(t *testing.T) {
 	want := 202
 	if got != want {
 		t.Fatalf("estimated requests = %d, want %d", got, want)
+	}
+}
+
+func TestWaitForRefreshWakesBeforeTimer(t *testing.T) {
+	refresh := make(chan struct{}, 1)
+	refresh <- struct{}{}
+
+	refreshed, err := waitForRefresh(context.Background(), refresh, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !refreshed {
+		t.Fatalf("expected refresh wake")
 	}
 }

@@ -62,7 +62,7 @@ func TestNarrowViewKeepsJobRowsVisible(t *testing.T) {
 }
 
 func TestLoadEventsAppendAndUpdateRows(t *testing.T) {
-	m := New(Dashboard{Animations: false, Loader: func(ctx context.Context, events chan<- LoadEvent) {}})
+	m := New(Dashboard{Animations: false, Loader: func(ctx context.Context, refresh <-chan struct{}, events chan<- LoadEvent) {}})
 
 	m.applyLoadEvent(LoadEvent{User: "octo-user", TotalDiscovered: 1, Message: "loading jobs"})
 	m.applyLoadEvent(LoadEvent{Row: &Row{PR: model.PullRequest{RepoFullName: "octo-org/prdash", Number: 12}, Loading: true}})
@@ -241,6 +241,44 @@ func TestRerunSkipsActiveWorkflowRuns(t *testing.T) {
 	}
 	if !strings.Contains(m.actionText, "no completed failed jobs") {
 		t.Fatalf("expected no failed jobs action text, got %q", m.actionText)
+	}
+}
+
+func TestSuccessfulActionRequestsHotRefresh(t *testing.T) {
+	m := New(Dashboard{
+		Animations: false,
+		Loader:     func(ctx context.Context, refresh <-chan struct{}, events chan<- LoadEvent) {},
+	})
+
+	updated, _ := m.Update(actionResultMsg{Message: "rerun requested"})
+	m = updated.(Model)
+
+	if !m.loading {
+		t.Fatalf("expected successful action to mark loading")
+	}
+	if !strings.Contains(m.loadText, "refresh requested") {
+		t.Fatalf("expected refresh load text, got %q", m.loadText)
+	}
+	select {
+	case <-m.refresh:
+	default:
+		t.Fatalf("expected hot refresh signal")
+	}
+}
+
+func TestFailedActionDoesNotRequestHotRefresh(t *testing.T) {
+	m := New(Dashboard{
+		Animations: false,
+		Loader:     func(ctx context.Context, refresh <-chan struct{}, events chan<- LoadEvent) {},
+	})
+
+	updated, _ := m.Update(actionResultMsg{Error: "github api 403"})
+	m = updated.(Model)
+
+	select {
+	case <-m.refresh:
+		t.Fatalf("failed action should not request refresh")
+	default:
 	}
 }
 
