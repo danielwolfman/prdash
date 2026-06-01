@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,12 +27,15 @@ func New() *cobra.Command {
 		Use:   "prdash",
 		Short: "A dense terminal dashboard for authored GitHub PRs",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dashboard, err := loadDashboard(cmd, configPath, limitOverride)
-			if err != nil {
-				return err
+			dashboard := tui.Dashboard{
+				SnapshotAt:   time.Now(),
+				Symbols:      "auto",
+				Animations:   true,
+				AnimationFPS: 6,
+				Loader:       dashboardLoader(configPath, limitOverride),
 			}
 			program := tea.NewProgram(tui.New(dashboard), tea.WithAltScreen(), tea.WithMouseCellMotion())
-			_, err = program.Run()
+			_, err := program.Run()
 			return err
 		},
 	}
@@ -45,63 +49,71 @@ func New() *cobra.Command {
 	return root
 }
 
-func loadDashboard(cmd *cobra.Command, configPath string, limitOverride int) (tui.Dashboard, error) {
-	path, err := config.ResolvePath(configPath)
-	if err != nil {
-		return tui.Dashboard{}, err
-	}
-	if err := config.EnsureExists(path); err != nil {
-		return tui.Dashboard{}, err
-	}
-	cfg, err := config.Load(path)
-	if err != nil {
-		return tui.Dashboard{}, err
-	}
-	if limitOverride > 0 {
-		cfg.Limits.MaxVisiblePRs = limitOverride
-	}
+func dashboardLoader(configPath string, limitOverride int) tui.Loader {
+	return func(ctx context.Context, events chan<- tui.LoadEvent) {
+		path, err := config.ResolvePath(configPath)
+		if err != nil {
+			events <- tui.LoadEvent{Error: err.Error(), Done: true}
+			return
+		}
+		events <- tui.LoadEvent{Message: "loading config"}
+		if err := config.EnsureExists(path); err != nil {
+			events <- tui.LoadEvent{Error: err.Error(), Done: true}
+			return
+		}
+		cfg, err := config.Load(path)
+		if err != nil {
+			events <- tui.LoadEvent{Error: err.Error(), Done: true}
+			return
+		}
+		if limitOverride > 0 {
+			cfg.Limits.MaxVisiblePRs = limitOverride
+		}
 
-	status, err := auth.Status(cmd.Context(), cfg.GitHub.Host)
-	if err != nil {
-		return tui.Dashboard{}, err
-	}
-	if !status.HasRequiredScopes() {
-		return tui.Dashboard{}, fmt.Errorf("missing GitHub token scopes: %s\nrun: %s", strings.Join(status.MissingScopes(), ", "), auth.RefreshScopesCommand(cfg.GitHub.Host))
-	}
+		events <- tui.LoadEvent{Message: "checking GitHub CLI auth"}
+		status, err := auth.Status(ctx, cfg.GitHub.Host)
+		if err != nil {
+			events <- tui.LoadEvent{Error: err.Error(), Done: true}
+			return
+		}
+		if !status.HasRequiredScopes() {
+			events <- tui.LoadEvent{Error: fmt.Sprintf("missing GitHub token scopes: %s; run: %s", strings.Join(status.MissingScopes(), ", "), auth.RefreshScopesCommand(cfg.GitHub.Host)), Done: true}
+			return
+		}
 
-	token, err := auth.Token(cmd.Context(), cfg.GitHub.Host)
-	if err != nil {
-		return tui.Dashboard{}, err
-	}
+		token, err := auth.Token(ctx, cfg.GitHub.Host)
+		if err != nil {
+			events <- tui.LoadEvent{Error: err.Error(), Done: true}
+			return
+		}
 
-	client := ghapi.NewClient(token)
-	searchLimit := maxInt(cfg.Limits.MaxVisiblePRs*2, cfg.Limits.MaxVisiblePRs)
-	if searchLimit <= 0 {
-		searchLimit = 40
-	}
-	if searchLimit > 100 {
-		searchLimit = 100
-	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "Loading up to %d authored PRs from GitHub...\n", cfg.Limits.MaxVisiblePRs)
-	prs, err := client.SearchAuthoredOpenPRs(cmd.Context(), searchLimit)
-	if err != nil {
-		return tui.Dashboard{}, err
-	}
+		client := ghapi.NewClient(token)
+		searchLimit := maxInt(cfg.Limits.MaxVisiblePRs*2, cfg.Limits.MaxVisiblePRs)
+		if searchLimit <= 0 {
+			searchLimit = 40
+		}
+		if searchLimit > 100 {
+			searchLimit = 100
+		}
+		events <- tui.LoadEvent{User: status.Account, Message: fmt.Sprintf("discovering up to %d authored PRs", cfg.Limits.MaxVisiblePRs), SnapshotAt: time.Now()}
+		prs, err := client.SearchAuthoredOpenPRs(ctx, searchLimit)
+		if err != nil {
+			events <- tui.LoadEvent{Error: err.Error(), Done: true}
+			return
+		}
 
-	rows, excluded := buildRows(cmd, client, prs, cfg)
-	return tui.Dashboard{
-		User:            status.Account,
-		SnapshotAt:      time.Now(),
-		Rows:            rows,
-		TotalDiscovered: len(prs),
-		ExcludedCount:   excluded,
-		Symbols:         cfg.UI.Symbols,
-		Animations:      cfg.UI.Animations,
-		AnimationFPS:    cfg.UI.AnimationFPS,
-	}, nil
+		rows, excluded := prepareRows(prs, cfg)
+		events <- tui.LoadEvent{TotalDiscovered: len(prs), ExcludedCount: excluded, Message: fmt.Sprintf("loading jobs for %d PRs", len(rows))}
+		for i := range rows {
+			row := rows[i]
+			events <- tui.LoadEvent{Row: &row, TotalDiscovered: len(prs), ExcludedCount: excluded}
+		}
+		streamJobFetches(ctx, client, rows, cfg.Limits.MaxConcurrentRequests, len(prs), excluded, events)
+		events <- tui.LoadEvent{Done: true, TotalDiscovered: len(prs), ExcludedCount: excluded, SnapshotAt: time.Now()}
+	}
 }
 
-func buildRows(cmd *cobra.Command, client *ghapi.Client, prs []model.PullRequest, cfg config.Config) ([]tui.Row, int) {
+func prepareRows(prs []model.PullRequest, cfg config.Config) ([]tui.Row, int) {
 	maxVisible := cfg.Limits.MaxVisiblePRs
 	if maxVisible <= 0 {
 		maxVisible = 40
@@ -117,13 +129,12 @@ func buildRows(cmd *cobra.Command, client *ghapi.Client, prs []model.PullRequest
 		if len(rows) >= maxVisible {
 			break
 		}
-		rows = append(rows, tui.Row{PR: pr})
+		rows = append(rows, tui.Row{PR: pr, Loading: true})
 	}
-	fetchRows(cmd, client, rows, cfg.Limits.MaxConcurrentRequests)
 	return rows, excluded
 }
 
-func fetchRows(cmd *cobra.Command, client *ghapi.Client, rows []tui.Row, concurrency int) {
+func streamJobFetches(ctx context.Context, client *ghapi.Client, rows []tui.Row, concurrency, totalDiscovered, excluded int, events chan<- tui.LoadEvent) {
 	if concurrency <= 0 {
 		concurrency = 1
 	}
@@ -140,12 +151,16 @@ func fetchRows(cmd *cobra.Command, client *ghapi.Client, rows []tui.Row, concurr
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			runs, err := client.CurrentWorkflowRunsWithJobs(cmd.Context(), rows[i].PR)
+			row := rows[i]
+			row.Loading = false
+			runs, err := client.CurrentWorkflowRunsWithJobs(ctx, row.PR)
 			if err != nil {
-				rows[i].FetchError = err.Error()
+				row.FetchError = err.Error()
+				events <- tui.LoadEvent{Row: &row, TotalDiscovered: totalDiscovered, ExcludedCount: excluded}
 				return
 			}
-			rows[i].Runs = runs
+			row.Runs = runs
+			events <- tui.LoadEvent{Row: &row, TotalDiscovered: totalDiscovered, ExcludedCount: excluded}
 		}(i)
 	}
 	wg.Wait()

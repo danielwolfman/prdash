@@ -1,12 +1,13 @@
 package tui
 
 import (
+	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/danielwolfman/prdash/internal/model"
 )
 
@@ -21,6 +22,10 @@ type Model struct {
 	now       time.Time
 	styles    styles
 	symbols   symbols
+	events    chan LoadEvent
+	loading   bool
+	loadText  string
+	loadError string
 }
 
 type tickMsg time.Time
@@ -33,6 +38,12 @@ func New(dashboard Dashboard) Model {
 	if dashboard.AnimationFPS <= 0 {
 		dashboard.AnimationFPS = 6
 	}
+	events := make(chan LoadEvent, 64)
+	loading := dashboard.Loader != nil
+	loadText := "loading GitHub auth and PR list"
+	if len(dashboard.Rows) > 0 {
+		loadText = "loaded"
+	}
 	return Model{
 		dashboard: dashboard,
 		width:     120,
@@ -41,14 +52,25 @@ func New(dashboard Dashboard) Model {
 		now:       now,
 		styles:    newStyles(),
 		symbols:   chooseSymbols(dashboard.Symbols),
+		events:    events,
+		loading:   loading,
+		loadText:  loadText,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
+	var cmds []tea.Cmd
 	if !m.dashboard.Animations {
-		return nil
+		if m.dashboard.Loader == nil {
+			return nil
+		}
+	} else {
+		cmds = append(cmds, m.tick())
 	}
-	return m.tick()
+	if m.dashboard.Loader != nil {
+		cmds = append(cmds, m.startLoader(), m.waitForLoadEvent())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -105,6 +127,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.dashboard.Animations {
 			return m, m.tick()
 		}
+	case LoadEvent:
+		m.applyLoadEvent(msg)
+		if !msg.Done && msg.Error == "" {
+			return m, m.waitForLoadEvent()
+		}
 	}
 	return m, nil
 }
@@ -118,7 +145,13 @@ func (m Model) View() string {
 
 	rows := m.renderRows(bodyHeight)
 	if len(rows) == 0 {
-		rows = []string{m.styles.muted.Render("No open authored PRs found.")}
+		if m.loading {
+			rows = []string{m.loadingLine()}
+		} else if m.loadError != "" {
+			rows = []string{m.styles.error.Render("load failed: " + m.loadError)}
+		} else {
+			rows = []string{m.styles.muted.Render("No open authored PRs found.")}
+		}
 	}
 	for _, line := range rows {
 		b.WriteString(fitANSI(line, m.width))
@@ -142,10 +175,15 @@ func (m Model) header() string {
 	if m.dashboard.TotalDiscovered > 0 {
 		loaded = fmt.Sprintf("%d/%d PRs", len(m.dashboard.Rows), m.dashboard.TotalDiscovered)
 	}
-	text := fmt.Sprintf(" prdash · %s · %s%s · static snapshot %s ",
+	state := "live loading"
+	if !m.loading {
+		state = "snapshot"
+	}
+	text := fmt.Sprintf(" prdash · %s · %s%s · %s %s ",
 		valueOr(m.dashboard.User, "unknown"),
 		loaded,
 		hidden,
+		state,
 		relativeTime(m.dashboard.SnapshotAt, m.now),
 	)
 	return m.styles.header.Width(max(1, m.width)).Render(fitPlain(text, max(1, m.width)))
@@ -156,8 +194,17 @@ func (m Model) footer() string {
 	if m.symbols.ascii {
 		mode = "ascii"
 	}
-	text := fmt.Sprintf(" ↑/↓ j/k move · enter expand · q quit · symbols %s · no polling/rerun in this milestone ", mode)
+	status := m.loadText
+	if m.loadError != "" {
+		status = "load error: " + m.loadError
+	}
+	text := fmt.Sprintf(" ↑/↓ j/k move · enter expand · q quit · symbols %s · %s ", mode, status)
 	return m.styles.footer.Width(max(1, m.width)).Render(fitPlain(text, max(1, m.width)))
+}
+
+func (m Model) loadingLine() string {
+	spinner := m.symbols.forState(model.CheckRunning, m.frame)
+	return m.styles.running.Render(spinner+" ") + m.styles.muted.Render(m.loadText)
 }
 
 func (m Model) renderRows(maxLines int) []string {
@@ -208,6 +255,10 @@ func (m Model) renderRow(index int, row Row) []string {
 
 	var lines []string
 	lines = append(lines, heading)
+	if row.Loading {
+		lines = append(lines, "  "+m.styles.running.Render(m.symbols.forState(model.CheckRunning, m.frame)+" loading jobs..."))
+		return lines
+	}
 	if row.FetchError != "" {
 		lines = append(lines, "  "+m.styles.error.Render(fitPlain("actions unavailable: "+row.FetchError, max(20, m.width-4))))
 		return lines
@@ -218,11 +269,13 @@ func (m Model) renderRow(index int, row Row) []string {
 	}
 
 	if expanded {
-		for _, run := range row.Runs {
-			lines = append(lines, "  "+m.workflowLine(run, true))
+		for _, line := range m.verticalJobLines(row.Runs, 8) {
+			lines = append(lines, "  "+line)
 		}
 	} else {
-		lines = append(lines, "  "+m.compactWorkflowLines(row.Runs))
+		for _, line := range m.verticalJobLines(row.Runs, 6) {
+			lines = append(lines, "  "+line)
+		}
 	}
 	return lines
 }
@@ -277,54 +330,169 @@ func (m Model) summary(summary model.CheckSummary, fetchError string) string {
 	return strings.Join(parts, " ")
 }
 
-func (m Model) compactWorkflowLines(runs []model.WorkflowRun) string {
-	available := max(24, m.width-4)
-	var parts []string
+func (m Model) verticalJobLines(runs []model.WorkflowRun, limit int) []string {
+	jobs := prioritizedJobs(runs, limit)
+	if len(jobs) == 0 {
+		return []string{m.styles.muted.Render("no jobs")}
+	}
+	lines := make([]string, 0, len(jobs)+1)
+	for _, job := range jobs {
+		lines = append(lines, m.jobLine(job))
+	}
+	total := len(allJobs(runs))
+	if total > len(jobs) {
+		lines = append(lines, m.styles.muted.Render(fmt.Sprintf("... %d successful/older jobs hidden", total-len(jobs))))
+	}
+	return lines
+}
+
+type displayJob struct {
+	Workflow string
+	Job      model.Job
+}
+
+func prioritizedJobs(runs []model.WorkflowRun, limit int) []displayJob {
+	var jobs []displayJob
 	for _, run := range runs {
-		part := m.workflowLine(run, false)
-		if lipgloss.Width(strings.Join(append(parts, part), "  ")) > available {
-			if len(parts) == 0 {
-				return fitANSI(part, available)
-			}
-			parts = append(parts, m.styles.muted.Render("..."))
-			break
+		for _, job := range run.Jobs {
+			jobs = append(jobs, displayJob{Workflow: run.Name, Job: job})
 		}
-		parts = append(parts, part)
 	}
-	return fitANSI(strings.Join(parts, "  "), available)
+	sort.SliceStable(jobs, func(i, j int) bool {
+		ip, jp := jobPriority(jobs[i].Job.State), jobPriority(jobs[j].Job.State)
+		if ip != jp {
+			return ip < jp
+		}
+		return jobs[i].Job.StartedAt.After(jobs[j].Job.StartedAt)
+	})
+	if limit > 0 && len(jobs) > limit {
+		return jobs[:limit]
+	}
+	return jobs
 }
 
-func (m Model) workflowLine(run model.WorkflowRun, expanded bool) string {
-	nameWidth := 18
-	if expanded {
-		nameWidth = 28
+func jobPriority(state model.CheckState) int {
+	switch state {
+	case model.CheckActionRequired:
+		return 0
+	case model.CheckFailure:
+		return 1
+	case model.CheckCancelled:
+		return 2
+	case model.CheckRunning:
+		return 3
+	case model.CheckWaiting:
+		return 4
+	case model.CheckUnknown:
+		return 5
+	case model.CheckSuccess:
+		return 6
+	case model.CheckNeutral:
+		return 7
+	default:
+		return 8
 	}
-	label := m.styles.workflow.Render(fitPlain(run.Name, nameWidth) + ":")
-	var chips []string
-	for _, job := range run.Jobs {
-		chips = append(chips, m.jobChip(job, expanded))
-	}
-	if len(chips) == 0 {
-		chips = append(chips, m.styles.muted.Render("no jobs"))
-	}
-	return label + " " + strings.Join(chips, " ")
 }
 
-func (m Model) jobChip(job model.Job, expanded bool) string {
+func (m Model) jobLine(display displayJob) string {
+	job := display.Job
 	symbol := m.symbols.forState(job.State, m.frame)
-	nameWidth := 8
-	if expanded {
-		nameWidth = 18
+	workflowWidth := clamp(m.width/5, 10, 28)
+	jobWidth := clamp(m.width-workflowWidth-24, 16, 80)
+	status := string(job.State)
+	if job.Conclusion != "" {
+		status = job.Conclusion
 	}
-	text := symbol
-	if expanded {
-		text += " " + fitPlain(abbreviate(job.Name), nameWidth)
-	} else {
-		text += fitPlain(abbreviate(job.Name), nameWidth)
+	text := fmt.Sprintf("%s %-*s %-*s %s",
+		symbol,
+		workflowWidth,
+		fitPlain(display.Workflow, workflowWidth),
+		jobWidth,
+		fitPlain(job.Name, jobWidth),
+		status,
+	)
+	if job.State == model.CheckSuccess || job.State == model.CheckNeutral {
+		text = fmt.Sprintf("%s %-*s %-*s %s",
+			symbol,
+			workflowWidth,
+			fitPlain(display.Workflow, workflowWidth),
+			jobWidth,
+			fitPlain(abbreviate(job.Name), jobWidth),
+			status,
+		)
 	}
 
 	style := m.styles.forState(job.State)
 	return style.Render(text)
+}
+
+func (m Model) startLoader() tea.Cmd {
+	loader := m.dashboard.Loader
+	events := m.events
+	return func() tea.Msg {
+		go func() {
+			loader(context.Background(), events)
+			close(events)
+		}()
+		return nil
+	}
+}
+
+func (m Model) waitForLoadEvent() tea.Cmd {
+	events := m.events
+	return func() tea.Msg {
+		event, ok := <-events
+		if !ok {
+			return LoadEvent{Done: true}
+		}
+		return event
+	}
+}
+
+func (m *Model) applyLoadEvent(event LoadEvent) {
+	if event.User != "" {
+		m.dashboard.User = event.User
+	}
+	if !event.SnapshotAt.IsZero() {
+		m.dashboard.SnapshotAt = event.SnapshotAt
+		m.now = event.SnapshotAt
+	}
+	if event.TotalDiscovered > 0 {
+		m.dashboard.TotalDiscovered = event.TotalDiscovered
+	}
+	m.dashboard.ExcludedCount = event.ExcludedCount
+	if event.Message != "" {
+		m.loadText = event.Message
+	}
+	if event.Row != nil {
+		replaced := false
+		for i := range m.dashboard.Rows {
+			if samePR(m.dashboard.Rows[i].PR, event.Row.PR) {
+				m.dashboard.Rows[i] = *event.Row
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			m.dashboard.Rows = append(m.dashboard.Rows, *event.Row)
+		}
+		m.loadText = fmt.Sprintf("loaded %d/%d PRs", len(m.dashboard.Rows), max(m.dashboard.TotalDiscovered, len(m.dashboard.Rows)))
+	}
+	if event.Error != "" {
+		m.loadError = event.Error
+		m.loading = false
+	}
+	if event.Done {
+		m.loading = false
+		if m.loadError == "" {
+			m.loadText = fmt.Sprintf("loaded %d PRs", len(m.dashboard.Rows))
+		}
+	}
+	m.keepCursorVisible()
+}
+
+func samePR(a, b model.PullRequest) bool {
+	return a.RepoFullName == b.RepoFullName && a.Number == b.Number
 }
 
 func (m *Model) keepCursorVisible() {

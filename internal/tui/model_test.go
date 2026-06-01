@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +25,7 @@ func TestViewRendersDenseDashboard(t *testing.T) {
 		"1 fail",
 		"1 run",
 		"1 ok",
-		"CI:",
+		"CI",
 		"integ",
 	} {
 		if !strings.Contains(view, want) {
@@ -42,21 +43,36 @@ func TestViewSupportsASCIISymbols(t *testing.T) {
 	if strings.Contains(view, "✓") || strings.Contains(view, "✗") || strings.Contains(view, "▸") {
 		t.Fatalf("ascii view contains unicode symbols:\n%s", view)
 	}
-	for _, want := range []string{">", "xinteg", "vbld"} {
+	for _, want := range []string{">", "x CI", "v CI", "bld"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("ascii view missing %q:\n%s", want, view)
 		}
 	}
 }
 
-func TestCompactWorkflowKeepsFirstWorkflowAtNarrowWidth(t *testing.T) {
+func TestNarrowViewKeepsJobRowsVisible(t *testing.T) {
 	m := New(sampleDashboard("unicode"))
 	m.width = 80
 	m.height = 12
 
 	view := stripANSI(m.View())
-	if !strings.Contains(view, "CI:") {
-		t.Fatalf("narrow view should keep first workflow visible:\n%s", view)
+	if !strings.Contains(view, "CI") || !strings.Contains(view, "integration") {
+		t.Fatalf("narrow view should keep job rows visible:\n%s", view)
+	}
+}
+
+func TestLoadEventsAppendAndUpdateRows(t *testing.T) {
+	m := New(Dashboard{Animations: false, Loader: func(ctx context.Context, events chan<- LoadEvent) {}})
+
+	m.applyLoadEvent(LoadEvent{User: "octo-user", TotalDiscovered: 1, Message: "loading jobs"})
+	m.applyLoadEvent(LoadEvent{Row: &Row{PR: model.PullRequest{RepoFullName: "octo-org/prdash", Number: 12}, Loading: true}})
+	if len(m.dashboard.Rows) != 1 || !m.dashboard.Rows[0].Loading {
+		t.Fatalf("expected loading skeleton row: %+v", m.dashboard.Rows)
+	}
+
+	m.applyLoadEvent(LoadEvent{Row: &Row{PR: model.PullRequest{RepoFullName: "octo-org/prdash", Number: 12}, Runs: []model.WorkflowRun{{Name: "CI"}}}})
+	if len(m.dashboard.Rows) != 1 || m.dashboard.Rows[0].Loading || len(m.dashboard.Rows[0].Runs) != 1 {
+		t.Fatalf("expected row update in place: %+v", m.dashboard.Rows)
 	}
 }
 
