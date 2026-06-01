@@ -97,6 +97,17 @@ func (c *Client) get(ctx context.Context, path string, values url.Values, out an
 	return json.Unmarshal(data, out)
 }
 
+func (c *Client) post(ctx context.Context, path string, out any) error {
+	data, err := c.doWithRetry(ctx, http.MethodPost, c.restBaseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal(data, out)
+}
+
 func (c *Client) doWithRetry(ctx context.Context, method, endpoint string, body []byte) ([]byte, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {

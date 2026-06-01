@@ -22,17 +22,20 @@ import (
 func New() *cobra.Command {
 	var configPath string
 	var limitOverride int
+	var allowRerun bool
 
 	root := &cobra.Command{
 		Use:   "prdash",
 		Short: "A dense terminal dashboard for authored GitHub PRs",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dashboard := tui.Dashboard{
-				SnapshotAt:   time.Now(),
-				Symbols:      "auto",
-				Animations:   true,
-				AnimationFPS: 6,
-				Loader:       dashboardLoader(configPath, limitOverride),
+				SnapshotAt:     time.Now(),
+				Symbols:        "auto",
+				Animations:     true,
+				AnimationFPS:   6,
+				Loader:         dashboardLoader(configPath, limitOverride),
+				ActionExecutor: actionExecutor(configPath, allowRerun),
+				ActionsEnabled: actionsEnabled(configPath, allowRerun),
 			}
 			program := tea.NewProgram(tui.New(dashboard), tea.WithAltScreen(), tea.WithMouseCellMotion())
 			_, err := program.Run()
@@ -41,12 +44,91 @@ func New() *cobra.Command {
 	}
 	root.PersistentFlags().StringVar(&configPath, "config", "", "config file path")
 	root.Flags().IntVar(&limitOverride, "limit", 0, "override max visible PRs for this run")
+	root.Flags().BoolVar(&allowRerun, "allow-rerun", false, "enable confirmed GitHub Actions rerun commands for this run")
 
 	root.AddCommand(configCommand(&configPath))
 	root.AddCommand(authCommand())
 	root.AddCommand(doctorCommand(&configPath))
 
 	return root
+}
+
+func actionsEnabled(configPath string, flagEnabled bool) bool {
+	if flagEnabled {
+		return true
+	}
+	path, err := config.ResolvePath(configPath)
+	if err != nil {
+		return false
+	}
+	if err := config.EnsureExists(path); err != nil {
+		return false
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return false
+	}
+	return cfg.Actions.AllowRerun
+}
+
+func actionExecutor(configPath string, flagEnabled bool) tui.ActionExecutor {
+	return func(ctx context.Context, request tui.ActionRequest) tui.ActionResult {
+		result := tui.ActionResult{Request: request}
+		path, err := config.ResolvePath(configPath)
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		if err := config.EnsureExists(path); err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		cfg, err := config.Load(path)
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		if !flagEnabled && !cfg.Actions.AllowRerun {
+			result.Error = "rerun disabled by config"
+			return result
+		}
+
+		status, err := auth.Status(ctx, cfg.GitHub.Host)
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		if !status.HasRequiredScopes() {
+			result.Error = fmt.Sprintf("missing GitHub token scopes: %s; run: %s", strings.Join(status.MissingScopes(), ", "), auth.RefreshScopesCommand(cfg.GitHub.Host))
+			return result
+		}
+		token, err := auth.Token(ctx, cfg.GitHub.Host)
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+
+		client := ghapi.NewClient(token)
+		switch request.Kind {
+		case tui.ActionRerunFailedJobs:
+			for _, runID := range request.RunIDs {
+				if err := client.RerunFailedJobs(ctx, request.Owner, request.Repo, runID); err != nil {
+					result.Error = err.Error()
+					return result
+				}
+			}
+			result.Message = fmt.Sprintf("rerun requested for %d failed jobs across %d workflow runs on %s/%s#%d",
+				request.JobCount,
+				request.WorkflowCount,
+				request.Owner,
+				request.Repo,
+				request.PRNumber,
+			)
+		default:
+			result.Error = fmt.Sprintf("unsupported action %q", request.Kind)
+		}
+		return result
+	}
 }
 
 func dashboardLoader(configPath string, limitOverride int) tui.Loader {

@@ -12,23 +12,32 @@ import (
 )
 
 type Model struct {
-	dashboard Dashboard
-	cursor    int
-	offset    int
-	width     int
-	height    int
-	expanded  map[int]bool
-	frame     int
-	now       time.Time
-	styles    styles
-	symbols   symbols
-	events    chan LoadEvent
-	loading   bool
-	loadText  string
-	loadError string
+	dashboard  Dashboard
+	cursor     int
+	offset     int
+	width      int
+	height     int
+	expanded   map[int]bool
+	frame      int
+	now        time.Time
+	styles     styles
+	symbols    symbols
+	events     chan LoadEvent
+	loading    bool
+	loadText   string
+	loadError  string
+	confirm    *confirmation
+	actionBusy bool
+	actionText string
 }
 
 type tickMsg time.Time
+type actionResultMsg ActionResult
+
+type confirmation struct {
+	request ActionRequest
+	text    string
+}
 
 func New(dashboard Dashboard) Model {
 	now := dashboard.SnapshotAt
@@ -80,6 +89,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.keepCursorVisible()
 	case tea.KeyMsg:
+		if m.confirm != nil {
+			return m.updateConfirmation(msg)
+		}
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
@@ -105,6 +117,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = len(m.dashboard.Rows) - 1
 			}
 			m.keepCursorVisible()
+		case "r":
+			m.planRerunFailedJobs()
 		}
 	case tea.MouseMsg:
 		switch msg.Type {
@@ -126,6 +140,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.Closed && msg.Error == "" {
 			return m, m.waitForLoadEvent()
 		}
+	case actionResultMsg:
+		m.actionBusy = false
+		result := ActionResult(msg)
+		if result.Error != "" {
+			m.actionText = "rerun failed: " + result.Error
+		} else if result.Message != "" {
+			m.actionText = result.Message
+		} else {
+			m.actionText = "rerun requested"
+		}
 	}
 	return m, nil
 }
@@ -133,6 +157,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	var b strings.Builder
 	bodyHeight := max(1, m.height-4)
+	if m.confirm != nil {
+		bodyHeight = max(1, m.height-5)
+	}
 
 	b.WriteString(m.header())
 	b.WriteByte('\n')
@@ -157,6 +184,10 @@ func (m Model) View() string {
 	}
 
 	b.WriteString(m.footer())
+	if m.confirm != nil {
+		b.WriteByte('\n')
+		b.WriteString(m.confirmLine())
+	}
 	return b.String()
 }
 
@@ -194,8 +225,23 @@ func (m Model) footer() string {
 	} else if m.dashboard.RefreshInterval > 0 && !m.loading {
 		status = fmt.Sprintf("%s · refresh %s", status, shortDuration(m.dashboard.RefreshInterval))
 	}
-	text := fmt.Sprintf(" ↑/↓ j/k move · enter expand · q quit · symbols %s · %s ", mode, status)
+	action := "r disabled"
+	if m.dashboard.ActionsEnabled {
+		action = "r rerun failed"
+	}
+	if m.actionText != "" {
+		action += " · " + m.actionText
+	}
+	text := fmt.Sprintf(" ↑/↓ j/k move · enter expand · %s · q quit · symbols %s · %s ", action, mode, status)
 	return m.styles.footer.Width(max(1, m.width)).Render(fitPlain(text, max(1, m.width)))
+}
+
+func (m Model) confirmLine() string {
+	if m.confirm == nil {
+		return ""
+	}
+	text := " " + m.confirm.text + " Enter/y confirm · Esc/n cancel "
+	return m.styles.confirm.Width(max(1, m.width)).Render(fitPlain(text, max(1, m.width)))
 }
 
 func (m Model) loadingLine() string {
@@ -454,6 +500,92 @@ func (m Model) startLoader() tea.Cmd {
 			close(events)
 		}()
 		return nil
+	}
+}
+
+func (m Model) updateConfirmation(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter", "y", "Y":
+		request := m.confirm.request
+		m.confirm = nil
+		m.actionBusy = true
+		m.actionText = "requesting rerun..."
+		return m, m.runAction(request)
+	case "esc", "n", "N":
+		m.confirm = nil
+		m.actionText = "rerun cancelled"
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+func (m *Model) planRerunFailedJobs() {
+	if !m.dashboard.ActionsEnabled || m.dashboard.ActionExecutor == nil {
+		m.actionText = "rerun disabled"
+		return
+	}
+	if m.actionBusy {
+		m.actionText = "rerun already in progress"
+		return
+	}
+	if len(m.dashboard.Rows) == 0 {
+		m.actionText = "no PR selected"
+		return
+	}
+	request := rerunFailedJobsRequest(m.dashboard.Rows[m.cursor])
+	if request.JobCount == 0 || len(request.RunIDs) == 0 {
+		m.actionText = "selected PR has no failed jobs to rerun"
+		return
+	}
+	m.confirm = &confirmation{
+		request: request,
+		text: fmt.Sprintf("Rerun %d failed jobs across %d workflow runs for %s/%s#%d?",
+			request.JobCount,
+			request.WorkflowCount,
+			request.Owner,
+			request.Repo,
+			request.PRNumber,
+		),
+	}
+}
+
+func rerunFailedJobsRequest(row Row) ActionRequest {
+	request := ActionRequest{
+		Kind:     ActionRerunFailedJobs,
+		Owner:    row.PR.Owner,
+		Repo:     row.PR.Repo,
+		PRNumber: row.PR.Number,
+		PRTitle:  row.PR.Title,
+	}
+	for _, run := range row.Runs {
+		if run.ID == 0 {
+			continue
+		}
+		failedJobs := 0
+		for _, job := range run.Jobs {
+			switch job.State {
+			case model.CheckActionRequired, model.CheckFailure, model.CheckCancelled:
+				failedJobs++
+			}
+		}
+		if failedJobs == 0 {
+			continue
+		}
+		request.RunIDs = append(request.RunIDs, run.ID)
+		request.JobCount += failedJobs
+		request.WorkflowCount++
+	}
+	return request
+}
+
+func (m Model) runAction(request ActionRequest) tea.Cmd {
+	executor := m.dashboard.ActionExecutor
+	return func() tea.Msg {
+		if executor == nil {
+			return actionResultMsg{Request: request, Error: "action executor unavailable"}
+		}
+		return actionResultMsg(executor(context.Background(), request))
 	}
 }
 

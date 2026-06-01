@@ -23,6 +23,7 @@ type styles struct {
 	unknown        lipgloss.Style
 	error          lipgloss.Style
 	stale          lipgloss.Style
+	confirm        lipgloss.Style
 }
 
 func newStyles() styles {
@@ -44,6 +45,7 @@ func newStyles() styles {
 		unknown:        lipgloss.NewStyle().Foreground(lipgloss.Color("201")),
 		error:          lipgloss.NewStyle().Foreground(lipgloss.Color("196")),
 		stale:          lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
+		confirm:        lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("94")).Bold(true),
 	}
 }
 

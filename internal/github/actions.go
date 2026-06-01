@@ -85,6 +85,21 @@ func (c *Client) CurrentWorkflowRunsWithJobs(ctx context.Context, pr model.PullR
 	return runs, nil
 }
 
+func (c *Client) RerunFailedJobs(ctx context.Context, owner, repo string, runID int64) error {
+	path := repoPath(owner, repo, "/actions/runs/"+strconv.FormatInt(runID, 10)+"/rerun-failed-jobs")
+	return c.post(ctx, path, nil)
+}
+
+func (c *Client) RerunWorkflowRun(ctx context.Context, owner, repo string, runID int64) error {
+	path := repoPath(owner, repo, "/actions/runs/"+strconv.FormatInt(runID, 10)+"/rerun")
+	return c.post(ctx, path, nil)
+}
+
+func (c *Client) RerunJob(ctx context.Context, owner, repo string, jobID int64) error {
+	path := repoPath(owner, repo, "/actions/jobs/"+strconv.FormatInt(jobID, 10)+"/rerun")
+	return c.post(ctx, path, nil)
+}
+
 func collapseLatestRuns(runs []model.WorkflowRun) []model.WorkflowRun {
 	byWorkflow := map[int64]model.WorkflowRun{}
 	for _, run := range runs {

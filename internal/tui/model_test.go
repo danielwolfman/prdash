@@ -160,6 +160,67 @@ func TestMouseWheelScrollsByRenderedLines(t *testing.T) {
 	}
 }
 
+func TestRerunFailedJobsPlanningAndConfirmation(t *testing.T) {
+	dashboard := sampleDashboard("unicode")
+	dashboard.ActionsEnabled = true
+	var captured ActionRequest
+	dashboard.ActionExecutor = func(ctx context.Context, request ActionRequest) ActionResult {
+		captured = request
+		return ActionResult{Request: request, Message: "rerun requested"}
+	}
+	m := New(dashboard)
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("rerun planning should wait for confirmation")
+	}
+	if m.confirm == nil {
+		t.Fatalf("expected confirmation")
+	}
+	if m.confirm.request.JobCount != 1 || m.confirm.request.WorkflowCount != 1 || len(m.confirm.request.RunIDs) != 1 || m.confirm.request.RunIDs[0] != 123 {
+		t.Fatalf("unexpected request: %+v", m.confirm.request)
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("confirming rerun should return command")
+	}
+	if !m.actionBusy {
+		t.Fatalf("expected action to be busy")
+	}
+
+	msg := cmd()
+	updated, _ = m.Update(msg)
+	m = updated.(Model)
+	if m.actionBusy {
+		t.Fatalf("expected action to finish")
+	}
+	if captured.Kind != ActionRerunFailedJobs || captured.Owner != "octo-org" || captured.Repo != "prdash" || captured.PRNumber != 12 {
+		t.Fatalf("unexpected captured request: %+v", captured)
+	}
+	if !strings.Contains(m.actionText, "rerun requested") {
+		t.Fatalf("expected action text to show result, got %q", m.actionText)
+	}
+}
+
+func TestRerunDisabledDoesNotOpenConfirmation(t *testing.T) {
+	m := New(sampleDashboard("unicode"))
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("disabled rerun should not return command")
+	}
+	if m.confirm != nil {
+		t.Fatalf("disabled rerun should not open confirmation")
+	}
+	if !strings.Contains(m.actionText, "disabled") {
+		t.Fatalf("expected disabled action text, got %q", m.actionText)
+	}
+}
+
 func sampleDashboard(symbols string) Dashboard {
 	now := time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC)
 	return Dashboard{
@@ -183,13 +244,14 @@ func sampleDashboard(symbols string) Dashboard {
 				},
 				Runs: []model.WorkflowRun{
 					{
+						ID:         123,
 						Name:       "CI",
 						RunAttempt: 2,
 						UpdatedAt:  now.Add(-2 * time.Minute),
 						Jobs: []model.Job{
-							{Name: "build", State: model.CheckSuccess},
-							{Name: "integration tests", State: model.CheckFailure},
-							{Name: "e2e", State: model.CheckRunning},
+							{Name: "build", RunID: 123, State: model.CheckSuccess},
+							{Name: "integration tests", RunID: 123, State: model.CheckFailure},
+							{Name: "e2e", RunID: 123, State: model.CheckRunning},
 						},
 					},
 				},
