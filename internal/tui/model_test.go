@@ -76,6 +76,31 @@ func TestLoadEventsAppendAndUpdateRows(t *testing.T) {
 	}
 }
 
+func TestLoadingRefreshKeepsCachedJobsVisible(t *testing.T) {
+	m := New(sampleDashboard("unicode"))
+	m.width = 220
+	m.height = 16
+
+	m.applyLoadEvent(LoadEvent{Row: &Row{
+		PR:      m.dashboard.Rows[0].PR,
+		Loading: true,
+	}})
+
+	if len(m.dashboard.Rows[0].Runs) == 0 {
+		t.Fatalf("expected cached runs to be preserved")
+	}
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "integration tests") {
+		t.Fatalf("cached job details should stay visible during refresh:\n%s", view)
+	}
+	if strings.Contains(view, "loading jobs...") {
+		t.Fatalf("refresh should not replace cached job details with loading only:\n%s", view)
+	}
+	if !strings.Contains(view, "refreshing") {
+		t.Fatalf("refresh indicator missing:\n%s", view)
+	}
+}
+
 func TestLoadEventsMarkChangedWhenSummaryChanges(t *testing.T) {
 	now := time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC)
 	m := New(Dashboard{SnapshotAt: now, Animations: false})

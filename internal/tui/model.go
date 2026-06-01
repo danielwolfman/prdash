@@ -302,6 +302,9 @@ func (m Model) renderRow(index int, row Row) []string {
 	if m.now.Before(row.ChangedUntil) {
 		statusSuffix += " " + m.styles.forState(row.ChangeState).Render("changed")
 	}
+	if row.Loading && (len(row.Runs) > 0 || row.FetchError != "") {
+		statusSuffix += " " + m.styles.running.Render(m.symbols.forState(model.CheckRunning, m.frame)+" refreshing")
+	}
 	if !row.LastFetched.IsZero() {
 		statusSuffix += " checked " + relativeTime(row.LastFetched, m.now)
 	}
@@ -325,7 +328,7 @@ func (m Model) renderRow(index int, row Row) []string {
 
 	var lines []string
 	lines = append(lines, heading)
-	if row.Loading {
+	if row.Loading && len(row.Runs) == 0 && row.FetchError == "" {
 		lines = append(lines, "  "+m.styles.running.Render(m.symbols.forState(model.CheckRunning, m.frame)+" loading jobs..."))
 		return lines
 	}
