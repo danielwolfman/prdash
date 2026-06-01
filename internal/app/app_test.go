@@ -30,3 +30,11 @@ func TestCalculateRefreshIntervalExpandsWithLargeVisibleSet(t *testing.T) {
 		t.Fatalf("refresh interval = %s, want over 1m for constrained budget", got)
 	}
 }
+
+func TestEstimateRefreshRequestsAllowsPaginatedJobLists(t *testing.T) {
+	got := estimateRefreshRequests(40)
+	want := 202
+	if got != want {
+		t.Fatalf("estimated requests = %d, want %d", got, want)
+	}
+}

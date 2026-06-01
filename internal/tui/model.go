@@ -535,7 +535,7 @@ func (m *Model) planRerunFailedJobs() {
 	}
 	request := rerunFailedJobsRequest(m.dashboard.Rows[m.cursor])
 	if request.JobCount == 0 || len(request.RunIDs) == 0 {
-		m.actionText = "selected PR has no failed jobs to rerun"
+		m.actionText = "selected PR has no completed failed jobs to rerun"
 		return
 	}
 	m.confirm = &confirmation{
@@ -559,7 +559,7 @@ func rerunFailedJobsRequest(row Row) ActionRequest {
 		PRTitle:  row.PR.Title,
 	}
 	for _, run := range row.Runs {
-		if run.ID == 0 {
+		if run.ID == 0 || !strings.EqualFold(run.Status, "completed") {
 			continue
 		}
 		failedJobs := 0

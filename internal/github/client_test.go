@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -207,6 +208,62 @@ func TestCurrentWorkflowRunsWithJobs(t *testing.T) {
 	summary := model.SummarizeJobs(runs[0].Jobs)
 	if summary.State != model.CheckFailure || summary.Failure != 1 || summary.Running != 1 || summary.Success != 1 {
 		t.Fatalf("unexpected summary: %+v", summary)
+	}
+}
+
+func TestJobsForRunPaginatesAllJobs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/octo-org/prdash/actions/runs/123/attempts/2/jobs" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("per_page"); got != "100" {
+			t.Fatalf("per_page = %q, want 100", got)
+		}
+		switch r.URL.Query().Get("page") {
+		case "1":
+			jobs := make([]map[string]any, 0, 100)
+			for i := 0; i < 100; i++ {
+				jobs = append(jobs, map[string]any{
+					"id":           i + 1,
+					"name":         fmt.Sprintf("ok-%03d", i),
+					"status":       "completed",
+					"conclusion":   "success",
+					"started_at":   "2026-06-01T14:00:00Z",
+					"completed_at": "2026-06-01T14:01:00Z",
+				})
+			}
+			writeJSON(t, w, map[string]any{"total_count": 101, "jobs": jobs})
+		case "2":
+			writeJSON(t, w, map[string]any{
+				"total_count": 101,
+				"jobs": []map[string]any{
+					{
+						"id":           101,
+						"name":         "ci / Run remaining lab tests (suite=jboss-operations-app-server-restart, Ubuntu 20, 1800, Ubuntu, 20, ...)",
+						"status":       "completed",
+						"conclusion":   "failure",
+						"started_at":   "2026-06-01T16:29:29Z",
+						"completed_at": "2026-06-01T16:55:40Z",
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected page: %s", r.URL.Query().Get("page"))
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token", WithBaseURLs(server.URL, server.URL+"/graphql"))
+	jobs, err := client.JobsForRun(context.Background(), "octo-org", "prdash", model.WorkflowRun{ID: 123, RunAttempt: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 101 {
+		t.Fatalf("len(jobs) = %d, want 101", len(jobs))
+	}
+	last := jobs[len(jobs)-1]
+	if !strings.Contains(last.Name, "jboss-operations-app-server-restart") || last.State != model.CheckFailure {
+		t.Fatalf("missing paginated failure job: %+v", last)
 	}
 }
 

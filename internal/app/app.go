@@ -289,7 +289,7 @@ func calculateRefreshInterval(cfg config.Config, visibleRows int) time.Duration 
 		budgetPercent = 60
 	}
 
-	estimatedRequests := 2 + visibleRows*3
+	estimatedRequests := estimateRefreshRequests(visibleRows)
 	allowedPerHour := 5000 * budgetPercent / 100
 	calculatedSeconds := estimatedRequests * 3600 / maxInt(1, allowedPerHour)
 	if calculatedSeconds < minSeconds {
@@ -299,6 +299,15 @@ func calculateRefreshInterval(cfg config.Config, visibleRows int) time.Duration 
 		calculatedSeconds = maxSeconds
 	}
 	return time.Duration(calculatedSeconds) * time.Second
+}
+
+func estimateRefreshRequests(visibleRows int) int {
+	if visibleRows <= 0 {
+		return 2
+	}
+	// Each row needs one run-list request plus one or more job-list pages. Large
+	// matrix workflows commonly spill past GitHub's 100-job page size.
+	return 2 + visibleRows*5
 }
 
 func sleepContext(ctx context.Context, d time.Duration) error {

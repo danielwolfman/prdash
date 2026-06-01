@@ -221,6 +221,29 @@ func TestRerunDisabledDoesNotOpenConfirmation(t *testing.T) {
 	}
 }
 
+func TestRerunSkipsActiveWorkflowRuns(t *testing.T) {
+	dashboard := sampleDashboard("unicode")
+	dashboard.ActionsEnabled = true
+	dashboard.ActionExecutor = func(ctx context.Context, request ActionRequest) ActionResult {
+		t.Fatalf("active workflow rerun should not execute: %+v", request)
+		return ActionResult{}
+	}
+	dashboard.Rows[0].Runs[0].Status = "in_progress"
+	m := New(dashboard)
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("active workflow rerun should not return command")
+	}
+	if m.confirm != nil {
+		t.Fatalf("active workflow rerun should not open confirmation")
+	}
+	if !strings.Contains(m.actionText, "no completed failed jobs") {
+		t.Fatalf("expected no failed jobs action text, got %q", m.actionText)
+	}
+}
+
 func sampleDashboard(symbols string) Dashboard {
 	now := time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC)
 	return Dashboard{
@@ -247,6 +270,7 @@ func sampleDashboard(symbols string) Dashboard {
 						ID:         123,
 						Name:       "CI",
 						RunAttempt: 2,
+						Status:     "completed",
 						UpdatedAt:  now.Add(-2 * time.Minute),
 						Jobs: []model.Job{
 							{Name: "build", RunID: 123, State: model.CheckSuccess},

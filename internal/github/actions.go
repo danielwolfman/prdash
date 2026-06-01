@@ -10,6 +10,8 @@ import (
 	"github.com/danielwolfman/prdash/internal/model"
 )
 
+const jobsPageSize = 100
+
 func (c *Client) WorkflowRunsForSHA(ctx context.Context, owner, repo, sha string) ([]model.WorkflowRun, error) {
 	values := url.Values{}
 	values.Set("head_sha", sha)
@@ -48,24 +50,31 @@ func (c *Client) JobsForRun(ctx context.Context, owner, repo string, run model.W
 		path = repoPath(owner, repo, "/actions/runs/"+strconv.FormatInt(run.ID, 10)+"/attempts/"+strconv.Itoa(run.RunAttempt)+"/jobs")
 	}
 
-	var response jobsResponse
-	if err := c.get(ctx, path, url.Values{"per_page": []string{"100"}}, &response); err != nil {
-		return nil, err
-	}
-
-	jobs := make([]model.Job, 0, len(response.Jobs))
-	for _, job := range response.Jobs {
-		jobs = append(jobs, model.Job{
-			ID:          job.ID,
-			RunID:       run.ID,
-			Name:        job.Name,
-			Status:      job.Status,
-			Conclusion:  job.Conclusion,
-			State:       model.NormalizeCheckState(job.Status, job.Conclusion),
-			URL:         job.HTMLURL,
-			StartedAt:   job.StartedAt.Time,
-			CompletedAt: job.CompletedAt.Time,
-		})
+	var jobs []model.Job
+	for page := 1; ; page++ {
+		var response jobsResponse
+		values := url.Values{}
+		values.Set("per_page", strconv.Itoa(jobsPageSize))
+		values.Set("page", strconv.Itoa(page))
+		if err := c.get(ctx, path, values, &response); err != nil {
+			return nil, err
+		}
+		for _, job := range response.Jobs {
+			jobs = append(jobs, model.Job{
+				ID:          job.ID,
+				RunID:       run.ID,
+				Name:        job.Name,
+				Status:      job.Status,
+				Conclusion:  job.Conclusion,
+				State:       model.NormalizeCheckState(job.Status, job.Conclusion),
+				URL:         job.HTMLURL,
+				StartedAt:   job.StartedAt.Time,
+				CompletedAt: job.CompletedAt.Time,
+			})
+		}
+		if len(response.Jobs) < jobsPageSize || response.TotalCount > 0 && len(jobs) >= response.TotalCount {
+			break
+		}
 	}
 	return jobs, nil
 }
@@ -150,7 +159,8 @@ type workflowRunsResponse struct {
 }
 
 type jobsResponse struct {
-	Jobs []struct {
+	TotalCount int `json:"total_count"`
+	Jobs       []struct {
 		ID          int64      `json:"id"`
 		Name        string     `json:"name"`
 		Status      string     `json:"status"`
