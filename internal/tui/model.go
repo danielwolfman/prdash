@@ -14,6 +14,7 @@ import (
 type Model struct {
 	dashboard  Dashboard
 	cursor     int
+	jobCursor  map[int]int
 	offset     int
 	width      int
 	height     int
@@ -34,10 +35,31 @@ type Model struct {
 
 type tickMsg time.Time
 type actionResultMsg ActionResult
+type openResultMsg struct {
+	URL   string
+	Label string
+	Error string
+}
+
+type selectionKind int
+
+const (
+	selectionPR selectionKind = iota
+	selectionJob
+)
 
 type confirmation struct {
 	request ActionRequest
 	text    string
+}
+
+type selection struct {
+	Kind  selectionKind
+	Row   int
+	Job   int
+	URL   string
+	Label string
+	Line  int
 }
 
 func New(dashboard Dashboard) Model {
@@ -60,6 +82,7 @@ func New(dashboard Dashboard) Model {
 		width:     120,
 		height:    36,
 		expanded:  map[int]bool{},
+		jobCursor: map[int]int{},
 		now:       now,
 		styles:    newStyles(),
 		symbols:   chooseSymbols(dashboard.Symbols),
@@ -99,27 +122,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
 		case "j", "down":
-			if m.cursor < len(m.dashboard.Rows)-1 {
-				m.cursor++
-			}
+			m.moveSelection(1)
 			m.keepCursorVisible()
 		case "k", "up":
-			if m.cursor > 0 {
-				m.cursor--
-			}
+			m.moveSelection(-1)
 			m.keepCursorVisible()
 		case "enter", " ":
 			if len(m.dashboard.Rows) > 0 {
 				m.expanded[m.cursor] = !m.expanded[m.cursor]
+				m.normalizeJobCursor()
 			}
 		case "home":
 			m.cursor = 0
+			m.jobCursor[m.cursor] = -1
 			m.keepCursorVisible()
 		case "end":
 			if len(m.dashboard.Rows) > 0 {
 				m.cursor = len(m.dashboard.Rows) - 1
+				m.jobCursor[m.cursor] = -1
 			}
 			m.keepCursorVisible()
+		case "o":
+			cmd := m.openSelection()
+			return m, cmd
 		case "r":
 			m.planRerunFailedJobs()
 		}
@@ -154,6 +179,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.actionText = "rerun requested"
 			m.requestRefresh()
+		}
+	case openResultMsg:
+		if msg.Error != "" {
+			m.actionText = "open failed: " + msg.Error
+		} else {
+			m.actionText = "opened " + valueOr(msg.Label, msg.URL)
 		}
 	}
 	return m, nil
@@ -237,7 +268,7 @@ func (m Model) footer() string {
 	if m.actionText != "" {
 		action += " · " + m.actionText
 	}
-	text := fmt.Sprintf(" ↑/↓ j/k move · enter expand · %s · q quit · symbols %s · %s ", action, mode, status)
+	text := fmt.Sprintf(" ↑/↓ j/k move · enter expand · o open · %s · q quit · symbols %s · %s ", action, mode, status)
 	return m.styles.footer.Width(max(1, m.width)).Render(fitPlain(text, max(1, m.width)))
 }
 
@@ -279,6 +310,10 @@ func (m Model) renderRows(maxLines int) []string {
 
 func (m Model) renderRow(index int, row Row) []string {
 	focused := index == m.cursor
+	selectedJob := -1
+	if focused {
+		selectedJob = m.currentJobCursor()
+	}
 	expanded := m.expanded[index]
 	jobs := allJobs(row.Runs)
 	summary := model.SummarizeJobs(jobs)
@@ -318,7 +353,7 @@ func (m Model) renderRow(index int, row Row) []string {
 		summaryText,
 		statusSuffix,
 	)
-	if focused {
+	if focused && selectedJob < 0 {
 		heading = m.styles.focused.Render(heading)
 	} else if stale {
 		heading = m.styles.stale.Render(heading)
@@ -341,13 +376,18 @@ func (m Model) renderRow(index int, row Row) []string {
 		return lines
 	}
 
-	if expanded {
-		for _, line := range m.verticalJobLines(row.Runs, 8) {
+	visibleJobs := m.visibleJobs(row.Runs, expanded)
+	if len(visibleJobs) > 0 {
+		for idx, job := range visibleJobs {
+			line := m.jobLine(job)
+			if focused && selectedJob == idx {
+				line = m.styles.focused.Render(line)
+			}
 			lines = append(lines, "  "+line)
 		}
-	} else {
-		for _, line := range m.verticalJobLines(row.Runs, 6) {
-			lines = append(lines, "  "+line)
+		total := len(allJobs(row.Runs))
+		if total > len(visibleJobs) {
+			lines = append(lines, m.styles.muted.Render(fmt.Sprintf("  ... %d successful/older jobs hidden", total-len(visibleJobs))))
 		}
 	}
 	return lines
@@ -403,20 +443,12 @@ func (m Model) summary(summary model.CheckSummary, fetchError string) string {
 	return strings.Join(parts, " ")
 }
 
-func (m Model) verticalJobLines(runs []model.WorkflowRun, limit int) []string {
-	jobs := prioritizedJobs(runs, limit)
-	if len(jobs) == 0 {
-		return []string{m.styles.muted.Render("no jobs")}
+func (m Model) visibleJobs(runs []model.WorkflowRun, expanded bool) []displayJob {
+	limit := 6
+	if expanded {
+		limit = 8
 	}
-	lines := make([]string, 0, len(jobs)+1)
-	for _, job := range jobs {
-		lines = append(lines, m.jobLine(job))
-	}
-	total := len(allJobs(runs))
-	if total > len(jobs) {
-		lines = append(lines, m.styles.muted.Render(fmt.Sprintf("... %d successful/older jobs hidden", total-len(jobs))))
-	}
-	return lines
+	return prioritizedJobs(runs, limit)
 }
 
 type displayJob struct {
@@ -610,6 +642,26 @@ func (m Model) runAction(request ActionRequest) tea.Cmd {
 	}
 }
 
+func (m *Model) openSelection() tea.Cmd {
+	selected, ok := m.currentSelection()
+	if !ok || strings.TrimSpace(selected.URL) == "" {
+		m.actionText = "nothing to open"
+		return nil
+	}
+	opener := m.dashboard.OpenURL
+	if opener == nil {
+		m.actionText = "open unavailable"
+		return nil
+	}
+	m.actionText = "opening " + valueOr(selected.Label, selected.URL)
+	return func() tea.Msg {
+		if err := opener(context.Background(), selected.URL); err != nil {
+			return openResultMsg{URL: selected.URL, Label: selected.Label, Error: err.Error()}
+		}
+		return openResultMsg{URL: selected.URL, Label: selected.Label}
+	}
+}
+
 func (m Model) waitForLoadEvent() tea.Cmd {
 	events := m.events
 	return func() tea.Msg {
@@ -711,6 +763,110 @@ func samePR(a, b model.PullRequest) bool {
 	return a.RepoFullName == b.RepoFullName && a.Number == b.Number
 }
 
+func (m Model) currentJobCursor() int {
+	if len(m.dashboard.Rows) == 0 {
+		return -1
+	}
+	value, ok := m.jobCursor[m.cursor]
+	if !ok {
+		return -1
+	}
+	return value
+}
+
+func (m *Model) setSelection(row, job int) {
+	if len(m.dashboard.Rows) == 0 {
+		m.cursor = 0
+		return
+	}
+	m.cursor = clamp(row, 0, len(m.dashboard.Rows)-1)
+	if job < 0 {
+		m.jobCursor[m.cursor] = -1
+		return
+	}
+	maxJob := len(m.visibleJobs(m.dashboard.Rows[m.cursor].Runs, m.expanded[m.cursor])) - 1
+	if maxJob < 0 {
+		m.jobCursor[m.cursor] = -1
+		return
+	}
+	m.jobCursor[m.cursor] = clamp(job, 0, maxJob)
+}
+
+func (m *Model) normalizeJobCursor() {
+	if len(m.dashboard.Rows) == 0 {
+		return
+	}
+	job := m.currentJobCursor()
+	if job < 0 {
+		return
+	}
+	maxJob := len(m.visibleJobs(m.dashboard.Rows[m.cursor].Runs, m.expanded[m.cursor])) - 1
+	if maxJob < 0 {
+		m.jobCursor[m.cursor] = -1
+		return
+	}
+	if job > maxJob {
+		m.jobCursor[m.cursor] = maxJob
+	}
+}
+
+func (m *Model) moveSelection(delta int) {
+	items := m.selectableItems()
+	if len(items) == 0 {
+		return
+	}
+	current := 0
+	for idx, item := range items {
+		if item.Row == m.cursor && item.Job == m.currentJobCursor() {
+			current = idx
+			break
+		}
+	}
+	next := clamp(current+delta, 0, len(items)-1)
+	m.setSelection(items[next].Row, items[next].Job)
+}
+
+func (m Model) currentSelection() (selection, bool) {
+	for _, item := range m.selectableItems() {
+		if item.Row == m.cursor && item.Job == m.currentJobCursor() {
+			return item, true
+		}
+	}
+	items := m.selectableItems()
+	if len(items) == 0 {
+		return selection{}, false
+	}
+	return items[0], true
+}
+
+func (m Model) selectableItems() []selection {
+	var items []selection
+	line := 0
+	for rowIdx, row := range m.dashboard.Rows {
+		rowLines := m.renderRow(rowIdx, row)
+		items = append(items, selection{
+			Kind:  selectionPR,
+			Row:   rowIdx,
+			Job:   -1,
+			URL:   row.PR.URL,
+			Label: fmt.Sprintf("%s#%d", row.PR.RepoFullName, row.PR.Number),
+			Line:  line,
+		})
+		for jobIdx, job := range m.visibleJobs(row.Runs, m.expanded[rowIdx]) {
+			items = append(items, selection{
+				Kind:  selectionJob,
+				Row:   rowIdx,
+				Job:   jobIdx,
+				URL:   job.Job.URL,
+				Label: job.Job.Name,
+				Line:  line + 1 + jobIdx,
+			})
+		}
+		line += len(rowLines)
+	}
+	return items
+}
+
 func (m *Model) keepCursorVisible() {
 	if len(m.dashboard.Rows) == 0 {
 		m.cursor = 0
@@ -723,9 +879,14 @@ func (m *Model) keepCursorVisible() {
 	if m.cursor >= len(m.dashboard.Rows) {
 		m.cursor = max(0, len(m.dashboard.Rows)-1)
 	}
+	m.normalizeJobCursor()
 	bodyLines := max(1, m.height-4)
 	start := m.rowStartLine(m.cursor)
 	end := start + len(m.renderRow(m.cursor, m.dashboard.Rows[m.cursor]))
+	if selected, ok := m.currentSelection(); ok && selected.Kind == selectionJob {
+		start = selected.Line
+		end = selected.Line + 1
+	}
 	if start < m.offset {
 		m.offset = start
 	}
@@ -746,16 +907,17 @@ func (m *Model) focusApproximateRow(y int) {
 		return
 	}
 	targetLine := m.offset + y - 1
-	line := 0
-	for idx := range m.dashboard.Rows {
-		line += len(m.renderRow(idx, m.dashboard.Rows[idx]))
-		if targetLine < line {
-			m.cursor = idx
-			m.keepCursorVisible()
-			return
+	var best selection
+	found := false
+	for _, item := range m.selectableItems() {
+		if item.Line <= targetLine {
+			best = item
+			found = true
 		}
 	}
-	m.cursor = len(m.dashboard.Rows) - 1
+	if found {
+		m.setSelection(best.Row, best.Job)
+	}
 	m.keepCursorVisible()
 }
 
@@ -766,7 +928,7 @@ func (m *Model) scrollDown() {
 	bodyLines := max(1, m.height-4)
 	maxOffset := max(0, m.totalRenderedLines()-bodyLines)
 	m.offset = min(maxOffset, m.offset+3)
-	m.cursor = m.firstVisibleRow()
+	m.focusLine(m.offset)
 }
 
 func (m *Model) scrollUp() {
@@ -774,19 +936,21 @@ func (m *Model) scrollUp() {
 		return
 	}
 	m.offset = max(0, m.offset-3)
-	m.cursor = m.firstVisibleRow()
+	m.focusLine(m.offset)
 }
 
-func (m Model) firstVisibleRow() int {
-	line := 0
-	for idx := range m.dashboard.Rows {
-		next := line + len(m.renderRow(idx, m.dashboard.Rows[idx]))
-		if next > m.offset {
-			return idx
+func (m *Model) focusLine(targetLine int) {
+	var best selection
+	found := false
+	for _, item := range m.selectableItems() {
+		if item.Line <= targetLine {
+			best = item
+			found = true
 		}
-		line = next
 	}
-	return max(0, len(m.dashboard.Rows)-1)
+	if found {
+		m.setSelection(best.Row, best.Job)
+	}
 }
 
 func (m Model) rowStartLine(row int) int {

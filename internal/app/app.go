@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,7 @@ func New() *cobra.Command {
 				Loader:         dashboardLoader(configPath, limitOverride),
 				ActionExecutor: actionExecutor(configPath, allowRerun),
 				ActionsEnabled: actionsEnabled(configPath, allowRerun),
+				OpenURL:        openURL,
 			}
 			program := tea.NewProgram(tui.New(dashboard), tea.WithAltScreen(), tea.WithMouseCellMotion())
 			_, err := program.Run()
@@ -51,6 +53,41 @@ func New() *cobra.Command {
 	root.AddCommand(doctorCommand(&configPath))
 
 	return root
+}
+
+func openURL(ctx context.Context, target string) error {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return fmt.Errorf("empty URL")
+	}
+	var candidates [][]string
+	switch runtime.GOOS {
+	case "darwin":
+		candidates = [][]string{{"open", "-a", "Google Chrome", target}, {"open", target}}
+	case "windows":
+		candidates = [][]string{{"rundll32", "url.dll,FileProtocolHandler", target}}
+	default:
+		candidates = [][]string{
+			{"google-chrome", target},
+			{"google-chrome-stable", target},
+			{"chromium", target},
+			{"chromium-browser", target},
+			{"xdg-open", target},
+		}
+	}
+	var lastErr error
+	for _, candidate := range candidates {
+		cmd := exec.CommandContext(ctx, candidate[0], candidate[1:]...)
+		if err := cmd.Start(); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("no browser command configured")
 }
 
 func actionsEnabled(configPath string, flagEnabled bool) bool {

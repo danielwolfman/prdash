@@ -16,7 +16,7 @@ This repository is private while v1 is being QAed. It should remain private unti
 
 ## Current Status
 
-Milestone 5 is in progress: CLI skeleton, config defaults, GitHub CLI auth inspection, doctor checks, GitHub GraphQL PR discovery, paginated REST Actions workflow/job fetching, status normalization, mocked API tests, a dense TUI that opens immediately while PR/job data streams in, conservative live refresh, stale row markers, change indicators, guarded PR-level rerun of failed jobs, and immediate refresh after successful rerun requests are implemented. Job/workflow-level focus controls are not implemented yet.
+Milestone 5 is in progress: CLI skeleton, config defaults, GitHub CLI auth inspection, doctor checks, GitHub GraphQL PR discovery, paginated REST Actions workflow/job fetching, status normalization, mocked API tests, a dense TUI that opens immediately while PR/job data streams in, PR/job selection, Chrome/browser opening for selected PRs and jobs, conservative live refresh, stale row markers, change indicators, guarded PR-level rerun of failed jobs, and immediate refresh after successful rerun requests are implemented. Job-level rerun controls are not implemented yet.
 
 ## Development
 
@@ -28,6 +28,6 @@ go run ./cmd/prdash --limit 3
 go run ./cmd/prdash --limit 3 --allow-rerun
 ```
 
-The default command opens the TUI immediately, discovers authored open PRs, then fills in current GitHub Actions jobs as background workers complete. It refreshes on a conservative interval derived from the configured rate budget, marks stale rows, and highlights status changes. Press `q` to quit. Use `--limit 3` for a faster local smoke test.
+The default command opens the TUI immediately, discovers authored open PRs, then fills in current GitHub Actions jobs as background workers complete. It refreshes on a conservative interval derived from the configured rate budget, marks stale rows, and highlights status changes. Press `j`/`k` or arrows to move across PRs and visible jobs, `o` to open the selected PR or job in Chrome/browser, and `q` to quit. Use `--limit 3` for a faster local smoke test.
 
 Rerun actions are disabled by default. Use `--allow-rerun` for one run, or set `[actions].allow_rerun = true` in the config. Press `r` on a selected PR to rerun failed jobs for completed workflow runs, then confirm with `Enter`/`y` or cancel with `Esc`/`n`. Runs that are still queued or in progress are not rerun. A successful rerun request wakes the loader immediately instead of waiting for the next scheduled refresh.

@@ -10,6 +10,7 @@ import (
 type Loader func(context.Context, <-chan struct{}, chan<- LoadEvent)
 
 type ActionExecutor func(context.Context, ActionRequest) ActionResult
+type URLOpener func(context.Context, string) error
 
 type ActionKind string
 
@@ -59,6 +60,7 @@ type Dashboard struct {
 	Loader          Loader
 	ActionExecutor  ActionExecutor
 	ActionsEnabled  bool
+	OpenURL         URLOpener
 	RefreshInterval time.Duration
 	StaleAfter      time.Duration
 }

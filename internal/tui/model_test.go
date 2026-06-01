@@ -145,14 +145,34 @@ func TestKeyboardNavigationAndExpansion(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = updated.(Model)
-	if m.cursor != 1 {
-		t.Fatalf("cursor = %d, want 1", m.cursor)
+	if m.cursor != 0 || m.currentJobCursor() != 0 {
+		t.Fatalf("selection = row %d job %d, want row 0 job 0", m.cursor, m.currentJobCursor())
 	}
 
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
-	if !m.expanded[1] {
-		t.Fatalf("row 1 should be expanded")
+	if !m.expanded[0] {
+		t.Fatalf("row 0 should be expanded")
+	}
+}
+
+func TestSelectionMovesAcrossPRsAndJobs(t *testing.T) {
+	m := New(sampleDashboard("unicode"))
+	m.width = 120
+	m.height = 20
+
+	for i := 0; i < 4; i++ {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = updated.(Model)
+	}
+	if m.cursor != 1 || m.currentJobCursor() != -1 {
+		t.Fatalf("selection = row %d job %d, want row 1 PR", m.cursor, m.currentJobCursor())
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if m.cursor != 0 || m.currentJobCursor() != 2 {
+		t.Fatalf("selection = row %d job %d, want row 0 job 2", m.cursor, m.currentJobCursor())
 	}
 }
 
@@ -227,6 +247,42 @@ func TestRerunFailedJobsPlanningAndConfirmation(t *testing.T) {
 	}
 	if !strings.Contains(m.actionText, "rerun requested") {
 		t.Fatalf("expected action text to show result, got %q", m.actionText)
+	}
+}
+
+func TestOpenSelectionOpensPRAndJobURL(t *testing.T) {
+	dashboard := sampleDashboard("unicode")
+	var opened []string
+	dashboard.OpenURL = func(ctx context.Context, target string) error {
+		opened = append(opened, target)
+		return nil
+	}
+	m := New(dashboard)
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected open command for PR")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected open command for job")
+	}
+	updated, _ = m.Update(cmd())
+	_ = updated.(Model)
+
+	want := []string{
+		"https://github.com/octo-org/prdash/pull/12",
+		"https://github.com/octo-org/prdash/actions/runs/123/job/101",
+	}
+	if strings.Join(opened, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("opened = %#v, want %#v", opened, want)
 	}
 }
 
@@ -323,6 +379,7 @@ func sampleDashboard(symbols string) Dashboard {
 					RepoFullName:     "octo-org/prdash",
 					Number:           12,
 					Title:            "Add dense dashboard",
+					URL:              "https://github.com/octo-org/prdash/pull/12",
 					IsDraft:          true,
 					UpdatedAt:        now.Add(-4 * time.Minute),
 					MergeStateStatus: "BLOCKED",
@@ -336,9 +393,9 @@ func sampleDashboard(symbols string) Dashboard {
 						Status:     "completed",
 						UpdatedAt:  now.Add(-2 * time.Minute),
 						Jobs: []model.Job{
-							{Name: "build", RunID: 123, State: model.CheckSuccess},
-							{Name: "integration tests", RunID: 123, State: model.CheckFailure},
-							{Name: "e2e", RunID: 123, State: model.CheckRunning},
+							{Name: "build", RunID: 123, State: model.CheckSuccess, URL: "https://github.com/octo-org/prdash/actions/runs/123/job/100"},
+							{Name: "integration tests", RunID: 123, State: model.CheckFailure, URL: "https://github.com/octo-org/prdash/actions/runs/123/job/101"},
+							{Name: "e2e", RunID: 123, State: model.CheckRunning, URL: "https://github.com/octo-org/prdash/actions/runs/123/job/102"},
 						},
 					},
 				},
