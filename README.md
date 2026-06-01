@@ -16,7 +16,7 @@ This repository is private while v1 is being QAed. It should remain private unti
 
 ## Current Status
 
-The project is in milestone 1: CLI skeleton, config defaults, GitHub CLI auth inspection, and doctor checks. The TUI and GitHub data fetcher are not implemented yet.
+Milestone 2 is complete: CLI skeleton, config defaults, GitHub CLI auth inspection, doctor checks, GitHub GraphQL PR discovery, REST Actions workflow/job fetching, status normalization, and mocked API tests. The TUI is not implemented yet.
 
 ## Development
 
@@ -24,4 +24,3 @@ The project is in milestone 1: CLI skeleton, config defaults, GitHub CLI auth in
 go test ./...
 go run ./cmd/prdash doctor
 ```
-
