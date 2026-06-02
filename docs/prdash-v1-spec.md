@@ -2,12 +2,14 @@
 
 ## Goals
 
-`prdash` is a general-purpose open-source local terminal dashboard for GitHub PRs authored by the authenticated user. It should be useful for private dogfooding first and remain private until v1 QA is complete.
+`prdash` is a general-purpose open-source local terminal dashboard for GitHub PRs authored by the authenticated user. It should be useful for dogfooding first, then hardened through public early releases.
 
 ## Non-Goals
 
 - Standalone OAuth device flow in v1.
 - Review-request dashboard.
+- Job-level rerun controls.
+- Redacted support bundle command.
 - OS notifications, sound, Slack, or daemon mode.
 - GitHub Enterprise Server as an officially supported target.
 - Required-check-only aggregation.
@@ -52,13 +54,9 @@ Keyboard support is complete; mouse support is an enhancement. Clicking a rerun 
 
 Alpha keeps rerun disabled by default. v1 enables rerun by default only when the token has `workflow` scope. All rerun actions require confirmation.
 
-Context-sensitive `r` behavior:
+Pressing `r` on a selected PR reruns failed jobs across all failed current-head workflow runs that are completed. Runs that are still queued or in progress are not rerun.
 
-- Focused failed job: rerun that job when supported.
-- Focused workflow run: rerun failed jobs in that workflow run.
-- Focused PR: rerun failed jobs across all failed current-head workflow runs.
-
-Whole-workflow rerun is a stronger deliberate action with stronger confirmation.
+Whole-workflow rerun and individual job rerun are stronger deliberate actions outside the v1 milestone path.
 
 ## Rate Scheduling
 
@@ -77,7 +75,7 @@ max_concurrent_requests = 2
 
 ## Logging and Privacy
 
-Debug logs are enabled by default, token-redacted, size-limited, and written to the platform cache directory. Logs include repo names and PR numbers, but omit PR titles by default. `doctor --bundle` defaults to redacted output.
+Debug logs are enabled by default, token-redacted, size-limited, and written to the platform cache directory. Logs include repo names and PR numbers, but omit PR titles by default.
 
 Security posture:
 
@@ -94,5 +92,4 @@ Security posture:
 3. Static dense TUI.
 4. Adaptive scheduler, live refresh, stale rows, animations.
 5. Confirmed rerun actions.
-6. OSS docs, privacy docs, redacted support bundle, releases.
-
+6. Private QA hardening and release iterations.

@@ -2,7 +2,7 @@
 
 `prdash` is a local terminal dashboard for GitHub pull requests authored by the authenticated user. The v1 goal is a dense, colorful TUI that shows open authored PRs, current-head GitHub Actions jobs, adaptive refresh state, and confirmed rerun actions.
 
-This repository is private while v1 is being QAed. It should remain private until Daniel explicitly decides the v1 release is ready for public distribution.
+This repository is public for early release testing. The current release is usable, but still being dogfooded and hardened.
 
 ## Planned v1 Shape
 
@@ -16,18 +16,18 @@ This repository is private while v1 is being QAed. It should remain private unti
 
 ## Current Status
 
-Milestone 8 is in progress: CLI skeleton, config defaults, `init`, `version`, repo filter commands, debug log commands, GitHub CLI auth inspection, doctor checks, GitHub GraphQL PR discovery, paginated REST Actions workflow/job fetching, status normalization, mocked API tests, dense TUI behavior, release build metadata, Makefile targets, CI, and GoReleaser packaging are implemented. Job-level rerun controls are not implemented yet.
+Private QA release `v0.1.0` is available. CLI skeleton, config defaults, `init`, `version`, repo filter commands, debug log commands, GitHub CLI auth inspection, doctor checks, GitHub GraphQL PR discovery, paginated REST Actions workflow/job fetching, status normalization, mocked API tests, dense TUI behavior, confirmed PR-level rerun, release build metadata, Makefile targets, CI, and GoReleaser packaging are implemented.
 
 ## Install
 
-During private QA:
+From source:
 
 ```sh
 go install ./cmd/prdash
 make install
 ```
 
-For a future public release, the intended install shape is:
+With Go:
 
 ```sh
 go install github.com/danielwolfman/prdash/cmd/prdash@latest
