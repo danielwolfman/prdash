@@ -1,0 +1,50 @@
+version: 2
+
+project_name: prdash
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: prdash
+    main: ./cmd/prdash
+    binary: prdash
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/danielwolfman/prdash/internal/app.Version={{ .Version }}
+      - -X github.com/danielwolfman/prdash/internal/app.Commit={{ .Commit }}
+      - -X github.com/danielwolfman/prdash/internal/app.Date={{ .Date }}
+
+archives:
+  - id: prdash
+    ids:
+      - prdash
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

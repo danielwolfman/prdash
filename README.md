@@ -16,7 +16,7 @@ This repository is private while v1 is being QAed. It should remain private unti
 
 ## Current Status
 
-Milestone 7 is in progress: CLI skeleton, config defaults, `init`, `version`, repo filter commands, debug log commands, GitHub CLI auth inspection, doctor checks, GitHub GraphQL PR discovery, paginated REST Actions workflow/job fetching, status normalization, mocked API tests, a dense TUI that opens immediately while PR/job data streams in, PR/job selection, Chrome/browser opening for selected PRs and jobs, conservative live refresh, stale row markers, change indicators, guarded PR-level rerun of failed jobs, and immediate refresh after successful rerun requests are implemented. Job-level rerun controls are not implemented yet.
+Milestone 8 is in progress: CLI skeleton, config defaults, `init`, `version`, repo filter commands, debug log commands, GitHub CLI auth inspection, doctor checks, GitHub GraphQL PR discovery, paginated REST Actions workflow/job fetching, status normalization, mocked API tests, dense TUI behavior, release build metadata, Makefile targets, CI, and GoReleaser packaging are implemented. Job-level rerun controls are not implemented yet.
 
 ## Install
 
@@ -24,6 +24,7 @@ During private QA:
 
 ```sh
 go install ./cmd/prdash
+make install
 ```
 
 For a future public release, the intended install shape is:
@@ -31,6 +32,8 @@ For a future public release, the intended install shape is:
 ```sh
 go install github.com/danielwolfman/prdash/cmd/prdash@latest
 ```
+
+Release archives are produced by GoReleaser for Linux and macOS on `amd64` and `arm64`.
 
 ## Setup
 
@@ -53,11 +56,32 @@ Debug logs are enabled by default and write to the user cache directory unless `
 ## Development
 
 ```sh
-go test ./...
-go run ./cmd/prdash doctor
+make test
+make build
+./dist/prdash version
+./dist/prdash doctor
 go run ./cmd/prdash
 go run ./cmd/prdash --limit 3
 go run ./cmd/prdash --limit 3 --allow-rerun
+```
+
+Build metadata is injected with `-ldflags` into `prdash version`:
+
+```sh
+make build VERSION=v0.1.0 COMMIT=$(git rev-parse --short HEAD)
+```
+
+To test release packaging locally:
+
+```sh
+make snapshot
+```
+
+To publish a release, push a semver tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
 The default command opens the TUI immediately, discovers authored open PRs, then fills in current GitHub Actions jobs as background workers complete. It refreshes on a conservative interval derived from the configured rate budget, marks stale rows, and highlights status changes. Press `j`/`k` or arrows to move across PRs and visible jobs, `o` to open the selected PR or job in Chrome/browser, and `q` to quit. Use `--limit 3` for a faster local smoke test.
