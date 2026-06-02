@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -139,6 +140,49 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+func Save(path string, cfg Config) error {
+	data, err := Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func AddExcludedRepo(cfg *Config, repo string) bool {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return false
+	}
+	for _, existing := range cfg.Filters.ExcludeRepos {
+		if strings.EqualFold(strings.TrimSpace(existing), repo) {
+			return false
+		}
+	}
+	cfg.Filters.ExcludeRepos = append(cfg.Filters.ExcludeRepos, repo)
+	return true
+}
+
+func RemoveExcludedRepo(cfg *Config, repo string) bool {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return false
+	}
+	next := cfg.Filters.ExcludeRepos[:0]
+	removed := false
+	for _, existing := range cfg.Filters.ExcludeRepos {
+		if strings.EqualFold(strings.TrimSpace(existing), repo) {
+			removed = true
+			continue
+		}
+		next = append(next, existing)
+	}
+	cfg.Filters.ExcludeRepos = next
+	return removed
 }
 
 func Marshal(cfg Config) ([]byte, error) {

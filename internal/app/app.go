@@ -20,6 +20,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var (
+	Version = "dev"
+	Commit  = "unknown"
+	Date    = "unknown"
+)
+
 func New() *cobra.Command {
 	var configPath string
 	var limitOverride int
@@ -48,9 +54,11 @@ func New() *cobra.Command {
 	root.Flags().IntVar(&limitOverride, "limit", 0, "override max visible PRs for this run")
 	root.Flags().BoolVar(&allowRerun, "allow-rerun", false, "enable confirmed GitHub Actions rerun commands for this run")
 
+	root.AddCommand(initCommand(&configPath))
 	root.AddCommand(configCommand(&configPath))
 	root.AddCommand(authCommand())
 	root.AddCommand(doctorCommand(&configPath))
+	root.AddCommand(versionCommand())
 
 	return root
 }
@@ -406,7 +414,136 @@ func configCommand(configPath *string) *cobra.Command {
 		},
 	})
 
+	cmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "Print config path and repo filters",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, cfg, err := loadConfigForEdit(*configPath)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "config: %s\n", path)
+			if len(cfg.Filters.ExcludeRepos) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "exclude_repos: none")
+				return nil
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "exclude_repos:")
+			for _, repo := range cfg.Filters.ExcludeRepos {
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", repo)
+			}
+			return nil
+		},
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "exclude owner/repo",
+		Short: "Exclude a repository from the dashboard",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, cfg, err := loadConfigForEdit(*configPath)
+			if err != nil {
+				return err
+			}
+			repo := strings.TrimSpace(args[0])
+			if repo == "" {
+				return fmt.Errorf("repo must not be empty")
+			}
+			added := config.AddExcludedRepo(&cfg, repo)
+			if err := config.Save(path, cfg); err != nil {
+				return err
+			}
+			if added {
+				fmt.Fprintf(cmd.OutOrStdout(), "excluded %s\n", repo)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s already excluded\n", repo)
+			}
+			return nil
+		},
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "include owner/repo",
+		Short: "Remove a repository from the exclude list",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, cfg, err := loadConfigForEdit(*configPath)
+			if err != nil {
+				return err
+			}
+			repo := strings.TrimSpace(args[0])
+			if repo == "" {
+				return fmt.Errorf("repo must not be empty")
+			}
+			removed := config.RemoveExcludedRepo(&cfg, repo)
+			if err := config.Save(path, cfg); err != nil {
+				return err
+			}
+			if removed {
+				fmt.Fprintf(cmd.OutOrStdout(), "included %s\n", repo)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s was not excluded\n", repo)
+			}
+			return nil
+		},
+	})
+
 	return cmd
+}
+
+func loadConfigForEdit(configPath string) (string, config.Config, error) {
+	path, err := config.ResolvePath(configPath)
+	if err != nil {
+		return "", config.Config{}, err
+	}
+	if err := config.EnsureExists(path); err != nil {
+		return "", config.Config{}, err
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return "", config.Config{}, err
+	}
+	return path, cfg, nil
+}
+
+func initCommand(configPath *string) *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "init",
+		Short: "Create a prdash config file",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, err := config.ResolvePath(*configPath)
+			if err != nil {
+				return err
+			}
+			if _, err := os.Stat(path); err == nil && !force {
+				fmt.Fprintf(cmd.OutOrStdout(), "config already exists: %s\n", path)
+			} else {
+				if err != nil && !os.IsNotExist(err) {
+					return err
+				}
+				if err := config.Save(path, config.Default()); err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "created config: %s\n", path)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "auth scopes: %s\n", auth.RefreshScopesCommand("github.com"))
+			fmt.Fprintln(cmd.OutOrStdout(), "run: prdash doctor")
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing config")
+	return cmd
+}
+
+func versionCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print prdash version information",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Fprintf(cmd.OutOrStdout(), "prdash %s\ncommit %s\nbuilt %s\n", Version, Commit, Date)
+			return nil
+		},
+	}
 }
 
 func authCommand() *cobra.Command {

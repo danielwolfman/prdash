@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"testing"
 )
 
@@ -49,5 +50,42 @@ func TestRepoExcluded(t *testing.T) {
 		if got := RepoExcluded(tt.repo, patterns); got != tt.want {
 			t.Fatalf("RepoExcluded(%q) = %v, want %v", tt.repo, got, tt.want)
 		}
+	}
+}
+
+func TestAddAndRemoveExcludedRepo(t *testing.T) {
+	cfg := Default()
+
+	if !AddExcludedRepo(&cfg, "octo-org/prdash") {
+		t.Fatalf("expected first add to change config")
+	}
+	if AddExcludedRepo(&cfg, "OCTO-ORG/PRDASH") {
+		t.Fatalf("duplicate add should not change config")
+	}
+	if len(cfg.Filters.ExcludeRepos) != 1 {
+		t.Fatalf("exclude repos = %#v", cfg.Filters.ExcludeRepos)
+	}
+	if !RemoveExcludedRepo(&cfg, "octo-org/prdash") {
+		t.Fatalf("expected remove to change config")
+	}
+	if RemoveExcludedRepo(&cfg, "octo-org/prdash") {
+		t.Fatalf("second remove should not change config")
+	}
+}
+
+func TestSaveCreatesParentDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "config.toml")
+	cfg := Default()
+	cfg.Filters.ExcludeRepos = []string{"octo-org/prdash"}
+
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Filters.ExcludeRepos) != 1 || loaded.Filters.ExcludeRepos[0] != "octo-org/prdash" {
+		t.Fatalf("loaded exclude repos = %#v", loaded.Filters.ExcludeRepos)
 	}
 }

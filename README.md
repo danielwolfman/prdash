@@ -16,7 +16,35 @@ This repository is private while v1 is being QAed. It should remain private unti
 
 ## Current Status
 
-Milestone 5 is in progress: CLI skeleton, config defaults, GitHub CLI auth inspection, doctor checks, GitHub GraphQL PR discovery, paginated REST Actions workflow/job fetching, status normalization, mocked API tests, a dense TUI that opens immediately while PR/job data streams in, PR/job selection, Chrome/browser opening for selected PRs and jobs, conservative live refresh, stale row markers, change indicators, guarded PR-level rerun of failed jobs, and immediate refresh after successful rerun requests are implemented. Job-level rerun controls are not implemented yet.
+Milestone 6 is in progress: CLI skeleton, config defaults, `init`, `version`, repo filter commands, GitHub CLI auth inspection, doctor checks, GitHub GraphQL PR discovery, paginated REST Actions workflow/job fetching, status normalization, mocked API tests, a dense TUI that opens immediately while PR/job data streams in, PR/job selection, Chrome/browser opening for selected PRs and jobs, conservative live refresh, stale row markers, change indicators, guarded PR-level rerun of failed jobs, and immediate refresh after successful rerun requests are implemented. Job-level rerun controls are not implemented yet.
+
+## Install
+
+During private QA:
+
+```sh
+go install ./cmd/prdash
+```
+
+For a future public release, the intended install shape is:
+
+```sh
+go install github.com/danielwolfman/prdash/cmd/prdash@latest
+```
+
+## Setup
+
+```sh
+prdash init
+prdash doctor
+prdash auth status
+prdash config list
+prdash config exclude owner/repo
+prdash config include owner/repo
+prdash version
+```
+
+`prdash init` creates the default config without overwriting an existing file unless `--force` is passed. Rerun actions require the GitHub CLI token to have the `workflow` scope; `prdash doctor` prints the exact `gh auth refresh` command when scopes are missing.
 
 ## Development
 
