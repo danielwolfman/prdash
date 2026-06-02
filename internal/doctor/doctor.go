@@ -8,6 +8,7 @@ import (
 
 	"github.com/danielwolfman/prdash/internal/auth"
 	"github.com/danielwolfman/prdash/internal/config"
+	logpkg "github.com/danielwolfman/prdash/internal/logging"
 )
 
 func Run(ctx context.Context, explicitConfigPath string) (string, error) {
@@ -20,6 +21,12 @@ func Run(ctx context.Context, explicitConfigPath string) (string, error) {
 		fmt.Fprintf(&b, "config path: fail (%v)\n", err)
 	} else {
 		fmt.Fprintf(&b, "config path: %s\n", path)
+		cfg, err := config.Load(path)
+		if err == nil {
+			if logPath, err := logpkg.ResolvePath(cfg.Logging.Path); err == nil {
+				fmt.Fprintf(&b, "log path: %s\n", logPath)
+			}
+		}
 	}
 
 	if _, err := exec.LookPath("gh"); err != nil {

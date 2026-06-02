@@ -15,6 +15,7 @@ import (
 	"github.com/danielwolfman/prdash/internal/config"
 	"github.com/danielwolfman/prdash/internal/doctor"
 	ghapi "github.com/danielwolfman/prdash/internal/github"
+	logpkg "github.com/danielwolfman/prdash/internal/logging"
 	"github.com/danielwolfman/prdash/internal/model"
 	"github.com/danielwolfman/prdash/internal/tui"
 	"github.com/spf13/cobra"
@@ -35,18 +36,26 @@ func New() *cobra.Command {
 		Use:   "prdash",
 		Short: "A dense terminal dashboard for authored GitHub PRs",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			logger, err := loggerForConfig(configPath)
+			if err != nil {
+				return err
+			}
+			logger.Info("prdash_start", map[string]any{
+				"version": Version,
+				"commit":  Commit,
+			})
 			dashboard := tui.Dashboard{
 				SnapshotAt:     time.Now(),
 				Symbols:        "auto",
 				Animations:     true,
 				AnimationFPS:   6,
-				Loader:         dashboardLoader(configPath, limitOverride),
-				ActionExecutor: actionExecutor(configPath, allowRerun),
+				Loader:         dashboardLoader(configPath, limitOverride, logger),
+				ActionExecutor: actionExecutor(configPath, allowRerun, logger),
 				ActionsEnabled: actionsEnabled(configPath, allowRerun),
 				OpenURL:        openURL,
 			}
 			program := tea.NewProgram(tui.New(dashboard), tea.WithAltScreen(), tea.WithMouseCellMotion())
-			_, err := program.Run()
+			_, err = program.Run()
 			return err
 		},
 	}
@@ -58,9 +67,25 @@ func New() *cobra.Command {
 	root.AddCommand(configCommand(&configPath))
 	root.AddCommand(authCommand())
 	root.AddCommand(doctorCommand(&configPath))
+	root.AddCommand(logsCommand(&configPath))
 	root.AddCommand(versionCommand())
 
 	return root
+}
+
+func loggerForConfig(configPath string) (*logpkg.Logger, error) {
+	path, err := config.ResolvePath(configPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := config.EnsureExists(path); err != nil {
+		return nil, err
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	return logpkg.New(cfg.Logging)
 }
 
 func openURL(ctx context.Context, target string) error {
@@ -116,49 +141,67 @@ func actionsEnabled(configPath string, flagEnabled bool) bool {
 	return cfg.Actions.AllowRerun
 }
 
-func actionExecutor(configPath string, flagEnabled bool) tui.ActionExecutor {
+func actionExecutor(configPath string, flagEnabled bool, logger *logpkg.Logger) tui.ActionExecutor {
 	return func(ctx context.Context, request tui.ActionRequest) tui.ActionResult {
 		result := tui.ActionResult{Request: request}
+		logger.Info("action_start", map[string]any{
+			"kind":           string(request.Kind),
+			"owner":          request.Owner,
+			"repo":           request.Repo,
+			"pr_number":      request.PRNumber,
+			"pr_title":       request.PRTitle,
+			"run_ids":        request.RunIDs,
+			"job_count":      request.JobCount,
+			"workflow_count": request.WorkflowCount,
+		})
 		path, err := config.ResolvePath(configPath)
 		if err != nil {
 			result.Error = err.Error()
+			logger.Error("action_error", map[string]any{"error": err.Error(), "kind": string(request.Kind)})
 			return result
 		}
 		if err := config.EnsureExists(path); err != nil {
 			result.Error = err.Error()
+			logger.Error("action_error", map[string]any{"error": err.Error(), "kind": string(request.Kind)})
 			return result
 		}
 		cfg, err := config.Load(path)
 		if err != nil {
 			result.Error = err.Error()
+			logger.Error("action_error", map[string]any{"error": err.Error(), "kind": string(request.Kind)})
 			return result
 		}
 		if !flagEnabled && !cfg.Actions.AllowRerun {
 			result.Error = "rerun disabled by config"
+			logger.Warn("action_error", map[string]any{"error": result.Error, "kind": string(request.Kind)})
 			return result
 		}
 
 		status, err := auth.Status(ctx, cfg.GitHub.Host)
 		if err != nil {
 			result.Error = err.Error()
+			logger.Error("action_error", map[string]any{"error": err.Error(), "kind": string(request.Kind)})
 			return result
 		}
 		if !status.HasRequiredScopes() {
 			result.Error = fmt.Sprintf("missing GitHub token scopes: %s; run: %s", strings.Join(status.MissingScopes(), ", "), auth.RefreshScopesCommand(cfg.GitHub.Host))
+			logger.Warn("action_error", map[string]any{"error": result.Error, "kind": string(request.Kind)})
 			return result
 		}
 		token, err := auth.Token(ctx, cfg.GitHub.Host)
 		if err != nil {
 			result.Error = err.Error()
+			logger.Error("action_error", map[string]any{"error": err.Error(), "kind": string(request.Kind)})
 			return result
 		}
 
-		client := ghapi.NewClient(token)
+		client := ghapi.NewClient(token, ghapi.WithLogger(logger))
 		switch request.Kind {
 		case tui.ActionRerunFailedJobs:
 			for _, runID := range request.RunIDs {
 				if err := client.RerunFailedJobs(ctx, request.Owner, request.Repo, runID); err != nil {
 					result.Error = err.Error()
+					logger.Error("action_error", map[string]any{"error": err.Error(), "kind": string(request.Kind), "run_id": runID})
 					return result
 				}
 			}
@@ -171,12 +214,22 @@ func actionExecutor(configPath string, flagEnabled bool) tui.ActionExecutor {
 			)
 		default:
 			result.Error = fmt.Sprintf("unsupported action %q", request.Kind)
+			logger.Warn("action_error", map[string]any{"error": result.Error, "kind": string(request.Kind)})
+		}
+		if result.Error == "" {
+			logger.Info("action_success", map[string]any{
+				"kind":      string(request.Kind),
+				"owner":     request.Owner,
+				"repo":      request.Repo,
+				"pr_number": request.PRNumber,
+				"run_ids":   request.RunIDs,
+			})
 		}
 		return result
 	}
 }
 
-func dashboardLoader(configPath string, limitOverride int) tui.Loader {
+func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger) tui.Loader {
 	return func(ctx context.Context, refresh <-chan struct{}, events chan<- tui.LoadEvent) {
 		path, err := config.ResolvePath(configPath)
 		if err != nil {
@@ -196,6 +249,14 @@ func dashboardLoader(configPath string, limitOverride int) tui.Loader {
 		if limitOverride > 0 {
 			cfg.Limits.MaxVisiblePRs = limitOverride
 		}
+		logger.Info("loader_config", map[string]any{
+			"config_path":      path,
+			"max_visible_prs":  cfg.Limits.MaxVisiblePRs,
+			"max_concurrency":  cfg.Limits.MaxConcurrentRequests,
+			"rate_budget_pct":  cfg.Limits.TargetRateBudgetPercent,
+			"log_path":         logger.Path(),
+			"exclude_patterns": len(cfg.Filters.ExcludeRepos),
+		})
 
 		events <- tui.LoadEvent{Message: "checking GitHub CLI auth"}
 		status, err := auth.Status(ctx, cfg.GitHub.Host)
@@ -214,7 +275,7 @@ func dashboardLoader(configPath string, limitOverride int) tui.Loader {
 			return
 		}
 
-		client := ghapi.NewClient(token)
+		client := ghapi.NewClient(token, ghapi.WithLogger(logger))
 		searchLimit := maxInt(cfg.Limits.MaxVisiblePRs*2, cfg.Limits.MaxVisiblePRs)
 		if searchLimit <= 0 {
 			searchLimit = 40
@@ -224,14 +285,24 @@ func dashboardLoader(configPath string, limitOverride int) tui.Loader {
 		}
 		for {
 			events <- tui.LoadEvent{User: status.Account, Message: fmt.Sprintf("discovering up to %d authored PRs", cfg.Limits.MaxVisiblePRs), SnapshotAt: time.Now()}
+			cycleStart := time.Now()
 			prs, err := client.SearchAuthoredOpenPRs(ctx, searchLimit)
 			if err != nil {
+				logger.Error("loader_search_error", map[string]any{"error": err.Error()})
 				events <- tui.LoadEvent{Error: err.Error(), Done: true}
 				return
 			}
 
 			rows, excluded := prepareRows(prs, cfg)
 			refreshInterval := calculateRefreshInterval(cfg, len(rows))
+			logger.Info("loader_discovered_prs", map[string]any{
+				"discovered":         len(prs),
+				"visible":            len(rows),
+				"excluded":           excluded,
+				"refresh_interval":   refreshInterval.String(),
+				"search_limit":       searchLimit,
+				"estimated_requests": estimateRefreshRequests(len(rows)),
+			})
 			events <- tui.LoadEvent{
 				TotalDiscovered: len(prs),
 				ExcludedCount:   excluded,
@@ -243,7 +314,7 @@ func dashboardLoader(configPath string, limitOverride int) tui.Loader {
 				row := rows[i]
 				events <- tui.LoadEvent{Row: &row, TotalDiscovered: len(prs), ExcludedCount: excluded, RefreshInterval: refreshInterval}
 			}
-			streamJobFetches(ctx, client, rows, cfg.Limits.MaxConcurrentRequests, len(prs), excluded, events)
+			streamJobFetches(ctx, client, rows, cfg.Limits.MaxConcurrentRequests, len(prs), excluded, events, logger)
 			events <- tui.LoadEvent{
 				Done:            true,
 				TotalDiscovered: len(prs),
@@ -252,12 +323,19 @@ func dashboardLoader(configPath string, limitOverride int) tui.Loader {
 				RefreshInterval: refreshInterval,
 				Message:         fmt.Sprintf("loaded %d PRs", len(rows)),
 			}
+			logger.Info("loader_cycle_complete", map[string]any{
+				"visible":     len(rows),
+				"excluded":    excluded,
+				"duration_ms": time.Since(cycleStart).Milliseconds(),
+			})
 
 			refreshed, err := waitForRefresh(ctx, refresh, refreshInterval)
 			if err != nil {
+				logger.Info("loader_stop", map[string]any{"error": err.Error()})
 				return
 			}
 			if refreshed {
+				logger.Info("loader_hot_refresh", nil)
 				events <- tui.LoadEvent{Message: "hot refresh after rerun", SnapshotAt: time.Now(), RefreshInterval: refreshInterval}
 			}
 		}
@@ -285,7 +363,7 @@ func prepareRows(prs []model.PullRequest, cfg config.Config) ([]tui.Row, int) {
 	return rows, excluded
 }
 
-func streamJobFetches(ctx context.Context, client *ghapi.Client, rows []tui.Row, concurrency, totalDiscovered, excluded int, events chan<- tui.LoadEvent) {
+func streamJobFetches(ctx context.Context, client *ghapi.Client, rows []tui.Row, concurrency, totalDiscovered, excluded int, events chan<- tui.LoadEvent, logger *logpkg.Logger) {
 	if concurrency <= 0 {
 		concurrency = 1
 	}
@@ -303,18 +381,42 @@ func streamJobFetches(ctx context.Context, client *ghapi.Client, rows []tui.Row,
 			defer func() { <-sem }()
 
 			row := rows[i]
+			start := time.Now()
 			row.Loading = false
 			runs, err := client.CurrentWorkflowRunsWithJobs(ctx, row.PR)
 			if err != nil {
 				row.FetchError = err.Error()
+				logger.Error("row_fetch_error", map[string]any{
+					"repo":        row.PR.RepoFullName,
+					"pr_number":   row.PR.Number,
+					"pr_title":    row.PR.Title,
+					"duration_ms": time.Since(start).Milliseconds(),
+					"error":       err.Error(),
+				})
 				events <- tui.LoadEvent{Row: &row, TotalDiscovered: totalDiscovered, ExcludedCount: excluded}
 				return
 			}
 			row.Runs = runs
+			logger.Info("row_fetch_complete", map[string]any{
+				"repo":        row.PR.RepoFullName,
+				"pr_number":   row.PR.Number,
+				"pr_title":    row.PR.Title,
+				"runs":        len(runs),
+				"jobs":        len(allWorkflowJobs(runs)),
+				"duration_ms": time.Since(start).Milliseconds(),
+			})
 			events <- tui.LoadEvent{Row: &row, TotalDiscovered: totalDiscovered, ExcludedCount: excluded}
 		}(i)
 	}
 	wg.Wait()
+}
+
+func allWorkflowJobs(runs []model.WorkflowRun) []model.Job {
+	var jobs []model.Job
+	for _, run := range runs {
+		jobs = append(jobs, run.Jobs...)
+	}
+	return jobs
 }
 
 func maxInt(a, b int) int {
@@ -544,6 +646,58 @@ func versionCommand() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func logsCommand(configPath *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "logs",
+		Short: "Inspect prdash debug logs",
+	}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "path",
+		Short: "Print the active log file path",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, cfg, err := loadConfigForEdit(*configPath)
+			if err != nil {
+				return err
+			}
+			path, err := logpkg.ResolvePath(cfg.Logging.Path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), path)
+			return nil
+		},
+	})
+
+	var lines int
+	tail := &cobra.Command{
+		Use:   "tail",
+		Short: "Print the last log lines",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, cfg, err := loadConfigForEdit(*configPath)
+			if err != nil {
+				return err
+			}
+			path, err := logpkg.ResolvePath(cfg.Logging.Path)
+			if err != nil {
+				return err
+			}
+			entries, err := logpkg.Tail(path, lines)
+			if err != nil {
+				return err
+			}
+			for _, entry := range entries {
+				fmt.Fprintln(cmd.OutOrStdout(), entry)
+			}
+			return nil
+		},
+	}
+	tail.Flags().IntVar(&lines, "lines", 80, "number of log lines to print")
+	cmd.AddCommand(tail)
+
+	return cmd
 }
 
 func authCommand() *cobra.Command {

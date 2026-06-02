@@ -26,6 +26,9 @@ func TestDefaultConfigMatchesV1Decisions(t *testing.T) {
 	if !cfg.Logging.Enabled || cfg.Logging.IncludePRTitles {
 		t.Fatalf("unexpected logging defaults: %+v", cfg.Logging)
 	}
+	if cfg.Logging.Level != "debug" {
+		t.Fatalf("logging level = %q, want debug", cfg.Logging.Level)
+	}
 }
 
 func TestRepoExcluded(t *testing.T) {

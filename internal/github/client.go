@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/danielwolfman/prdash/internal/logging"
 )
 
 const defaultUserAgent = "prdash"
@@ -23,6 +25,7 @@ type Client struct {
 	restBaseURL string
 	graphQLURL  string
 	userAgent   string
+	logger      *logging.Logger
 }
 
 type Option func(*Client)
@@ -57,6 +60,12 @@ func WithBaseURLs(restBaseURL, graphQLURL string) Option {
 		if strings.TrimSpace(graphQLURL) != "" {
 			client.graphQLURL = graphQLURL
 		}
+	}
+}
+
+func WithLogger(logger *logging.Logger) Option {
+	return func(client *Client) {
+		client.logger = logger
 	}
 }
 
@@ -121,8 +130,10 @@ func (c *Client) doWithRetry(ctx context.Context, method, endpoint string, body 
 		}
 		c.setHeaders(req)
 
+		start := time.Now()
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			c.logRequest(method, endpoint, attempt, 0, time.Since(start), err)
 			lastErr = err
 			if attempt == maxAttempts {
 				return nil, err
@@ -134,6 +145,7 @@ func (c *Client) doWithRetry(ctx context.Context, method, endpoint string, body 
 		}
 
 		data, err := readResponse(resp)
+		c.logRequest(method, endpoint, attempt, resp.StatusCode, time.Since(start), err)
 		if err == nil {
 			return data, nil
 		}
@@ -148,6 +160,25 @@ func (c *Client) doWithRetry(ctx context.Context, method, endpoint string, body 
 		}
 	}
 	return nil, lastErr
+}
+
+func (c *Client) logRequest(method, endpoint string, attempt, status int, duration time.Duration, err error) {
+	if c.logger == nil {
+		return
+	}
+	fields := map[string]any{
+		"method":      method,
+		"api_url":     endpoint,
+		"attempt":     attempt,
+		"status":      status,
+		"duration_ms": duration.Milliseconds(),
+	}
+	if err != nil {
+		fields["error"] = err.Error()
+		c.logger.Warn("github_request", fields)
+		return
+	}
+	c.logger.Info("github_request", fields)
 }
 
 func (c *Client) setHeaders(req *http.Request) {

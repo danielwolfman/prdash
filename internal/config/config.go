@@ -93,7 +93,7 @@ func Default() Config {
 		},
 		Logging: LoggingConfig{
 			Enabled:         true,
-			Level:           "info",
+			Level:           "debug",
 			MaxSizeMB:       10,
 			MaxFiles:        3,
 			RedactTokens:    true,

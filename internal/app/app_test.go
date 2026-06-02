@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -91,6 +92,36 @@ func TestVersionCommand(t *testing.T) {
 	}
 	if !strings.Contains(out, "prdash ") || !strings.Contains(out, "commit ") {
 		t.Fatalf("unexpected version output: %q", out)
+	}
+}
+
+func TestLogsCommands(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	logPath := filepath.Join(dir, "prdash.log")
+	cfg := config.Default()
+	cfg.Logging.Path = logPath
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := executeTestCommand("--config", configPath, "logs", "path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(out) != logPath {
+		t.Fatalf("logs path = %q, want %q", strings.TrimSpace(out), logPath)
+	}
+
+	out, err = executeTestCommand("--config", configPath, "logs", "tail", "--lines", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(out) != "two\nthree" {
+		t.Fatalf("logs tail = %q", out)
 	}
 }
 
