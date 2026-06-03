@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/danielwolfman/prdash/internal/model"
 )
@@ -27,6 +28,9 @@ func (c *Client) WorkflowRunsForSHA(ctx context.Context, owner, repo, sha string
 		if run.HeadSHA != sha {
 			continue
 		}
+		if runExcludedFromPRSummary(run.Event) {
+			continue
+		}
 		runs = append(runs, model.WorkflowRun{
 			ID:         run.ID,
 			Name:       run.Name,
@@ -42,6 +46,10 @@ func (c *Client) WorkflowRunsForSHA(ctx context.Context, owner, repo, sha string
 		})
 	}
 	return collapseLatestRuns(runs), nil
+}
+
+func runExcludedFromPRSummary(event string) bool {
+	return event == "workflow_dispatch"
 }
 
 func (c *Client) JobsForRun(ctx context.Context, owner, repo string, run model.WorkflowRun) ([]model.Job, error) {
@@ -84,14 +92,72 @@ func (c *Client) CurrentWorkflowRunsWithJobs(ctx context.Context, pr model.PullR
 	if err != nil {
 		return nil, err
 	}
+	var checkRuns []model.Job
+	var checkRunsLoaded bool
 	for i := range runs {
 		jobs, err := c.JobsForRun(ctx, pr.Owner, pr.Repo, runs[i])
 		if err != nil {
-			return nil, err
+			if c.logger != nil {
+				c.logger.Warn("jobs_endpoint_failed_using_checks_fallback", map[string]any{
+					"owner":    pr.Owner,
+					"repo":     pr.Repo,
+					"run_id":   runs[i].ID,
+					"head_sha": pr.HeadSHA,
+					"error":    err.Error(),
+				})
+			}
+			if !checkRunsLoaded {
+				checkRuns, _ = c.CheckRunsForRef(ctx, pr.Owner, pr.Repo, pr.HeadSHA)
+				checkRunsLoaded = true
+			}
+			jobs = jobsForWorkflowRun(checkRuns, runs[i])
+			if len(jobs) == 0 {
+				return nil, err
+			}
+			if c.logger != nil {
+				c.logger.Info("checks_fallback_jobs_loaded", map[string]any{
+					"owner":  pr.Owner,
+					"repo":   pr.Repo,
+					"run_id": runs[i].ID,
+					"jobs":   len(jobs),
+				})
+			}
 		}
 		runs[i].Jobs = jobs
 	}
 	return runs, nil
+}
+
+func (c *Client) CheckRunsForRef(ctx context.Context, owner, repo, ref string) ([]model.Job, error) {
+	path := repoPath(owner, repo, "/commits/"+ref+"/check-runs")
+
+	var jobs []model.Job
+	for page := 1; ; page++ {
+		var response checkRunsResponse
+		values := url.Values{}
+		values.Set("per_page", strconv.Itoa(jobsPageSize))
+		values.Set("page", strconv.Itoa(page))
+		if err := c.get(ctx, path, values, &response); err != nil {
+			return nil, err
+		}
+		for _, check := range response.CheckRuns {
+			jobs = append(jobs, model.Job{
+				ID:          check.ID,
+				RunID:       runIDFromActionsURL(check.HTMLURL),
+				Name:        check.Name,
+				Status:      check.Status,
+				Conclusion:  check.Conclusion,
+				State:       model.NormalizeCheckState(check.Status, check.Conclusion),
+				URL:         firstNonEmpty(check.HTMLURL, check.DetailsURL),
+				StartedAt:   check.StartedAt.Time,
+				CompletedAt: check.CompletedAt.Time,
+			})
+		}
+		if len(response.CheckRuns) < jobsPageSize || response.TotalCount > 0 && len(jobs) >= response.TotalCount {
+			break
+		}
+	}
+	return jobs, nil
 }
 
 func (c *Client) RerunFailedJobs(ctx context.Context, owner, repo string, runID int64) error {
@@ -142,6 +208,45 @@ func repoPath(owner, repo, suffix string) string {
 	return fmt.Sprintf("/repos/%s/%s%s", url.PathEscape(owner), url.PathEscape(repo), suffix)
 }
 
+func jobsForWorkflowRun(jobs []model.Job, run model.WorkflowRun) []model.Job {
+	var matched []model.Job
+	for _, job := range jobs {
+		if job.RunID == run.ID {
+			matched = append(matched, job)
+		}
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		if matched[i].CompletedAt.Equal(matched[j].CompletedAt) {
+			return matched[i].Name < matched[j].Name
+		}
+		return matched[i].CompletedAt.After(matched[j].CompletedAt)
+	})
+	return matched
+}
+
+func runIDFromActionsURL(raw string) int64 {
+	parts := strings.Split(raw, "/")
+	for i := 0; i < len(parts)-1; i++ {
+		if parts[i] != "runs" {
+			continue
+		}
+		id, err := strconv.ParseInt(parts[i+1], 10, 64)
+		if err == nil {
+			return id
+		}
+	}
+	return 0
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 type workflowRunsResponse struct {
 	WorkflowRuns []struct {
 		ID         int64      `json:"id"`
@@ -169,4 +274,18 @@ type jobsResponse struct {
 		StartedAt   githubTime `json:"started_at"`
 		CompletedAt githubTime `json:"completed_at"`
 	} `json:"jobs"`
+}
+
+type checkRunsResponse struct {
+	TotalCount int `json:"total_count"`
+	CheckRuns  []struct {
+		ID          int64      `json:"id"`
+		Name        string     `json:"name"`
+		Status      string     `json:"status"`
+		Conclusion  string     `json:"conclusion"`
+		HTMLURL     string     `json:"html_url"`
+		DetailsURL  string     `json:"details_url"`
+		StartedAt   githubTime `json:"started_at"`
+		CompletedAt githubTime `json:"completed_at"`
+	} `json:"check_runs"`
 }

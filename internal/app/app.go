@@ -255,6 +255,7 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 			"max_concurrency":  cfg.Limits.MaxConcurrentRequests,
 			"rate_budget_pct":  cfg.Limits.TargetRateBudgetPercent,
 			"log_path":         logger.Path(),
+			"include_owners":   len(cfg.Filters.IncludeOwners),
 			"exclude_patterns": len(cfg.Filters.ExcludeRepos),
 		})
 
@@ -286,7 +287,7 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 		for {
 			events <- tui.LoadEvent{User: status.Account, Message: fmt.Sprintf("discovering up to %d authored PRs", cfg.Limits.MaxVisiblePRs), SnapshotAt: time.Now()}
 			cycleStart := time.Now()
-			prs, err := client.SearchAuthoredOpenPRs(ctx, searchLimit)
+			prs, err := client.SearchAuthoredOpenPRs(ctx, searchLimit, cfg.Filters.IncludeOwners)
 			if err != nil {
 				logger.Error("loader_search_error", map[string]any{"error": err.Error()})
 				events <- tui.LoadEvent{Error: err.Error(), Done: true}
@@ -306,6 +307,8 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 			events <- tui.LoadEvent{
 				TotalDiscovered: len(prs),
 				ExcludedCount:   excluded,
+				Rows:            rows,
+				ReplaceRows:     true,
 				Message:         fmt.Sprintf("refreshing jobs for %d PRs", len(rows)),
 				RefreshInterval: refreshInterval,
 				SnapshotAt:      time.Now(),
@@ -351,6 +354,10 @@ func prepareRows(prs []model.PullRequest, cfg config.Config) ([]tui.Row, int) {
 	rows := make([]tui.Row, 0, maxVisible)
 	excluded := 0
 	for _, pr := range prs {
+		if !config.RepoAllowedByOwner(pr.RepoFullName, cfg.Filters.IncludeOwners) {
+			excluded++
+			continue
+		}
 		if config.RepoExcluded(pr.RepoFullName, cfg.Filters.ExcludeRepos) {
 			excluded++
 			continue
@@ -525,17 +532,118 @@ func configCommand(configPath *string) *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "config: %s\n", path)
+			if len(cfg.Filters.IncludeOwners) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "include_owners: all")
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "include_owners:")
+				for _, owner := range cfg.Filters.IncludeOwners {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", owner)
+				}
+			}
 			if len(cfg.Filters.ExcludeRepos) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "exclude_repos: none")
-				return nil
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "exclude_repos:")
+				for _, repo := range cfg.Filters.ExcludeRepos {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", repo)
+				}
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "exclude_repos:")
-			for _, repo := range cfg.Filters.ExcludeRepos {
-				fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", repo)
+			fmt.Fprintf(cmd.OutOrStdout(), "allow_rerun: %t\n", cfg.Actions.AllowRerun)
+			return nil
+		},
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "include-owner owner",
+		Short: "Only include repositories owned by this user or organization",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, cfg, err := loadConfigForEdit(*configPath)
+			if err != nil {
+				return err
+			}
+			owner := strings.TrimSpace(args[0])
+			if owner == "" {
+				return fmt.Errorf("owner must not be empty")
+			}
+			added := config.AddIncludedOwner(&cfg, owner)
+			if err := config.Save(path, cfg); err != nil {
+				return err
+			}
+			if added {
+				fmt.Fprintf(cmd.OutOrStdout(), "included owner %s\n", owner)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "owner %s already included\n", owner)
 			}
 			return nil
 		},
 	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "remove-owner owner",
+		Short: "Remove an owner from the include-owner filter",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, cfg, err := loadConfigForEdit(*configPath)
+			if err != nil {
+				return err
+			}
+			owner := strings.TrimSpace(args[0])
+			if owner == "" {
+				return fmt.Errorf("owner must not be empty")
+			}
+			removed := config.RemoveIncludedOwner(&cfg, owner)
+			if err := config.Save(path, cfg); err != nil {
+				return err
+			}
+			if removed {
+				fmt.Fprintf(cmd.OutOrStdout(), "removed owner %s\n", owner)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "owner %s was not included\n", owner)
+			}
+			return nil
+		},
+	})
+
+	rerunCmd := &cobra.Command{
+		Use:   "rerun",
+		Short: "Configure rerun actions",
+	}
+	rerunCmd.AddCommand(&cobra.Command{
+		Use:   "enable",
+		Short: "Enable confirmed rerun actions",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, cfg, err := loadConfigForEdit(*configPath)
+			if err != nil {
+				return err
+			}
+			cfg.Actions.AllowRerun = true
+			if err := config.Save(path, cfg); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "rerun enabled")
+			return nil
+		},
+	})
+	rerunCmd.AddCommand(&cobra.Command{
+		Use:   "disable",
+		Short: "Disable rerun actions",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, cfg, err := loadConfigForEdit(*configPath)
+			if err != nil {
+				return err
+			}
+			cfg.Actions.AllowRerun = false
+			if err := config.Save(path, cfg); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "rerun disabled")
+			return nil
+		},
+	})
+	cmd.AddCommand(rerunCmd)
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "exclude owner/repo",

@@ -62,7 +62,7 @@ func (c *Client) ViewerLogin(ctx context.Context) (string, error) {
 	return response.Viewer.Login, nil
 }
 
-func (c *Client) SearchAuthoredOpenPRs(ctx context.Context, limit int) ([]model.PullRequest, error) {
+func (c *Client) SearchAuthoredOpenPRs(ctx context.Context, limit int, includeOwners []string) ([]model.PullRequest, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -70,7 +70,15 @@ func (c *Client) SearchAuthoredOpenPRs(ctx context.Context, limit int) ([]model.
 	if err != nil {
 		return nil, err
 	}
-	query := fmt.Sprintf("is:pr is:open author:%s archived:false sort:updated-desc", login)
+	queryParts := []string{"is:pr", "is:open", "author:" + login, "archived:false"}
+	for _, owner := range includeOwners {
+		owner = strings.TrimSpace(owner)
+		if owner != "" {
+			queryParts = append(queryParts, "org:"+owner)
+		}
+	}
+	queryParts = append(queryParts, "sort:updated-desc")
+	query := strings.Join(queryParts, " ")
 
 	var prs []model.PullRequest
 	var after *string

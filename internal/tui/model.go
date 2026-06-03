@@ -390,7 +390,31 @@ func (m Model) renderRow(index int, row Row) []string {
 			lines = append(lines, m.styles.muted.Render(fmt.Sprintf("  ... %d successful/older jobs hidden", total-len(visibleJobs))))
 		}
 	}
+	if rowFullyGreen(row, summary) {
+		return m.greenBox(lines)
+	}
 	return lines
+}
+
+func (m Model) greenBox(lines []string) []string {
+	if len(lines) == 0 {
+		return lines
+	}
+	boxWidth := max(20, m.width-2)
+	return strings.Split(m.styles.greenBox.Width(boxWidth).Render(strings.Join(lines, "\n")), "\n")
+}
+
+func rowFullyGreen(row Row, summary model.CheckSummary) bool {
+	return !row.Loading &&
+		row.FetchError == "" &&
+		summary.Total > 0 &&
+		summary.Failure == 0 &&
+		summary.Cancelled == 0 &&
+		summary.ActionRequired == 0 &&
+		summary.Running == 0 &&
+		summary.Waiting == 0 &&
+		summary.Unknown == 0 &&
+		summary.Stale == 0
 }
 
 func (m Model) badges(row Row) string {
@@ -694,6 +718,10 @@ func (m *Model) applyLoadEvent(event LoadEvent) {
 	if event.Message != "" {
 		m.loadText = event.Message
 	}
+	if event.ReplaceRows {
+		m.replaceRows(event.Rows)
+		m.loadText = fmt.Sprintf("loaded %d/%d PRs", len(m.dashboard.Rows), max(m.dashboard.TotalDiscovered, len(m.dashboard.Rows)))
+	}
 	if event.Row != nil {
 		row := *event.Row
 		if row.LastFetched.IsZero() && !row.Loading {
@@ -723,6 +751,39 @@ func (m *Model) applyLoadEvent(event LoadEvent) {
 		}
 	}
 	m.keepCursorVisible()
+}
+
+func (m *Model) replaceRows(rows []Row) {
+	oldRows := m.dashboard.Rows
+	nextRows := make([]Row, 0, len(rows))
+	for _, row := range rows {
+		if row.LastFetched.IsZero() && !row.Loading {
+			row.LastFetched = m.now
+		}
+		for _, old := range oldRows {
+			if samePR(old.PR, row.PR) {
+				row = m.mergeRowState(old, row)
+				break
+			}
+		}
+		nextRows = append(nextRows, row)
+	}
+	m.dashboard.Rows = nextRows
+	if len(m.dashboard.Rows) == 0 {
+		m.cursor = 0
+		m.jobCursor = map[int]int{}
+		return
+	}
+	if m.cursor >= len(m.dashboard.Rows) {
+		m.cursor = len(m.dashboard.Rows) - 1
+	}
+	nextJobCursor := make(map[int]int, len(m.jobCursor))
+	for row := range m.jobCursor {
+		if row < len(m.dashboard.Rows) {
+			nextJobCursor[row] = m.jobCursor[row]
+		}
+	}
+	m.jobCursor = nextJobCursor
 }
 
 func (m Model) mergeRowState(old, next Row) Row {

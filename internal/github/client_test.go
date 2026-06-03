@@ -33,7 +33,7 @@ func TestSearchAuthoredOpenPRs(t *testing.T) {
 				},
 			})
 		case strings.Contains(req.Query, "SearchPullRequests"):
-			if query := req.Variables["query"].(string); !strings.Contains(query, "author:octo-user") || !strings.Contains(query, "sort:updated-desc") {
+			if query := req.Variables["query"].(string); !strings.Contains(query, "author:octo-user") || !strings.Contains(query, "org:octo-org") || !strings.Contains(query, "sort:updated-desc") {
 				t.Fatalf("unexpected search query: %s", query)
 			}
 			writeJSON(t, w, map[string]any{
@@ -85,7 +85,7 @@ func TestSearchAuthoredOpenPRs(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-token", WithBaseURLs(server.URL, server.URL+"/graphql"))
-	prs, err := client.SearchAuthoredOpenPRs(context.Background(), 40)
+	prs, err := client.SearchAuthoredOpenPRs(context.Background(), 40, []string{"octo-org"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,6 +148,18 @@ func TestCurrentWorkflowRunsWithJobs(t *testing.T) {
 						"head_sha":    "oldsha",
 						"updated_at":  "2026-06-01T14:30:00Z",
 					},
+					{
+						"id":          13,
+						"name":        "Manual lab proof",
+						"workflow_id": 3,
+						"run_number":  20,
+						"run_attempt": 1,
+						"event":       "workflow_dispatch",
+						"status":      "completed",
+						"conclusion":  "failure",
+						"head_sha":    "abc123",
+						"updated_at":  "2026-06-01T15:00:00Z",
+					},
 				},
 			})
 		case r.URL.Path == "/repos/octo-org/prdash/actions/runs/11/attempts/2/jobs":
@@ -208,6 +220,79 @@ func TestCurrentWorkflowRunsWithJobs(t *testing.T) {
 	summary := model.SummarizeJobs(runs[0].Jobs)
 	if summary.State != model.CheckFailure || summary.Failure != 1 || summary.Running != 1 || summary.Success != 1 {
 		t.Fatalf("unexpected summary: %+v", summary)
+	}
+}
+
+func TestCurrentWorkflowRunsWithJobsFallsBackToCheckRuns(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repos/octo-org/prdash/actions/runs":
+			writeJSON(t, w, map[string]any{
+				"workflow_runs": []map[string]any{
+					{
+						"id":          10,
+						"name":        "CI",
+						"workflow_id": 1,
+						"run_number":  7,
+						"run_attempt": 4,
+						"event":       "pull_request",
+						"status":      "completed",
+						"conclusion":  "failure",
+						"html_url":    "https://github.com/octo-org/prdash/actions/runs/10",
+						"head_sha":    "abc123",
+						"updated_at":  "2026-06-01T14:00:00Z",
+					},
+				},
+			})
+		case r.URL.Path == "/repos/octo-org/prdash/actions/runs/10/attempts/4/jobs":
+			http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
+		case r.URL.Path == "/repos/octo-org/prdash/commits/abc123/check-runs":
+			writeJSON(t, w, map[string]any{
+				"total_count": 2,
+				"check_runs": []map[string]any{
+					{
+						"id":           100,
+						"name":         "build",
+						"status":       "completed",
+						"conclusion":   "success",
+						"html_url":     "https://github.com/octo-org/prdash/actions/runs/10/job/100",
+						"details_url":  "https://github.com/octo-org/prdash/actions/runs/10/job/100",
+						"started_at":   "2026-06-01T14:00:00Z",
+						"completed_at": "2026-06-01T14:02:00Z",
+					},
+					{
+						"id":           101,
+						"name":         "old run",
+						"status":       "completed",
+						"conclusion":   "failure",
+						"html_url":     "https://github.com/octo-org/prdash/actions/runs/9/job/101",
+						"details_url":  "https://github.com/octo-org/prdash/actions/runs/9/job/101",
+						"started_at":   "2026-06-01T14:00:00Z",
+						"completed_at": "2026-06-01T14:02:00Z",
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token", WithBaseURLs(server.URL, server.URL+"/graphql"))
+	runs, err := client.CurrentWorkflowRunsWithJobs(context.Background(), model.PullRequest{
+		Owner:   "octo-org",
+		Repo:    "prdash",
+		HeadSHA: "abc123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || len(runs[0].Jobs) != 1 {
+		t.Fatalf("unexpected runs: %+v", runs)
+	}
+	job := runs[0].Jobs[0]
+	if job.Name != "build" || job.RunID != 10 || job.State != model.CheckSuccess {
+		t.Fatalf("unexpected fallback job: %+v", job)
 	}
 }
 

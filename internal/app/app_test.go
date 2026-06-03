@@ -85,6 +85,37 @@ func TestConfigCommandsEditExcludeRepos(t *testing.T) {
 	}
 }
 
+func TestConfigCommandsEditIncludedOwnersAndRerun(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+
+	if out, err := executeTestCommand("--config", path, "init"); err != nil || !strings.Contains(out, "created config") {
+		t.Fatalf("init out=%q err=%v", out, err)
+	}
+	if out, err := executeTestCommand("--config", path, "config", "include-owner", "my-company"); err != nil || !strings.Contains(out, "included owner") {
+		t.Fatalf("include-owner out=%q err=%v", out, err)
+	}
+	if out, err := executeTestCommand("--config", path, "config", "rerun", "enable"); err != nil || !strings.Contains(out, "rerun enabled") {
+		t.Fatalf("rerun enable out=%q err=%v", out, err)
+	}
+	out, err := executeTestCommand("--config", path, "config", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "my-company") || !strings.Contains(out, "allow_rerun: true") {
+		t.Fatalf("unexpected config list: %q", out)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Filters.IncludeOwners) != 1 || cfg.Filters.IncludeOwners[0] != "my-company" {
+		t.Fatalf("include owners = %#v", cfg.Filters.IncludeOwners)
+	}
+	if !cfg.Actions.AllowRerun {
+		t.Fatalf("expected rerun enabled")
+	}
+}
+
 func TestVersionCommand(t *testing.T) {
 	out, err := executeTestCommand("version")
 	if err != nil {

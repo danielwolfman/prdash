@@ -56,6 +56,18 @@ func TestRepoExcluded(t *testing.T) {
 	}
 }
 
+func TestRepoAllowedByOwner(t *testing.T) {
+	if !RepoAllowedByOwner("octo-org/prdash", nil) {
+		t.Fatalf("empty owner filter should allow all repos")
+	}
+	if !RepoAllowedByOwner("octo-org/prdash", []string{"OCTO-ORG"}) {
+		t.Fatalf("expected matching owner to be allowed")
+	}
+	if RepoAllowedByOwner("other-org/prdash", []string{"octo-org"}) {
+		t.Fatalf("expected non-matching owner to be filtered")
+	}
+}
+
 func TestAddAndRemoveExcludedRepo(t *testing.T) {
 	cfg := Default()
 
@@ -72,6 +84,26 @@ func TestAddAndRemoveExcludedRepo(t *testing.T) {
 		t.Fatalf("expected remove to change config")
 	}
 	if RemoveExcludedRepo(&cfg, "octo-org/prdash") {
+		t.Fatalf("second remove should not change config")
+	}
+}
+
+func TestAddAndRemoveIncludedOwner(t *testing.T) {
+	cfg := Default()
+
+	if !AddIncludedOwner(&cfg, "octo-org") {
+		t.Fatalf("expected first add to change config")
+	}
+	if AddIncludedOwner(&cfg, "OCTO-ORG") {
+		t.Fatalf("duplicate add should not change config")
+	}
+	if len(cfg.Filters.IncludeOwners) != 1 {
+		t.Fatalf("include owners = %#v", cfg.Filters.IncludeOwners)
+	}
+	if !RemoveIncludedOwner(&cfg, "octo-org") {
+		t.Fatalf("expected remove to change config")
+	}
+	if RemoveIncludedOwner(&cfg, "octo-org") {
 		t.Fatalf("second remove should not change config")
 	}
 }

@@ -39,6 +39,8 @@ type LoadEvent struct {
 	User            string
 	TotalDiscovered int
 	ExcludedCount   int
+	Rows            []Row
+	ReplaceRows     bool
 	Row             *Row
 	Done            bool
 	Closed          bool

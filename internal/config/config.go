@@ -25,6 +25,7 @@ type GitHubConfig struct {
 }
 
 type FiltersConfig struct {
+	IncludeOwners   []string `toml:"include_owners"`
 	ExcludeRepos    []string `toml:"exclude_repos"`
 	IncludeDrafts   bool     `toml:"include_drafts"`
 	IncludeArchived bool     `toml:"include_archived"`
@@ -69,6 +70,7 @@ func Default() Config {
 			AuthSource: "gh",
 		},
 		Filters: FiltersConfig{
+			IncludeOwners:   []string{},
 			ExcludeRepos:    []string{},
 			IncludeDrafts:   true,
 			IncludeArchived: false,
@@ -182,6 +184,38 @@ func RemoveExcludedRepo(cfg *Config, repo string) bool {
 		next = append(next, existing)
 	}
 	cfg.Filters.ExcludeRepos = next
+	return removed
+}
+
+func AddIncludedOwner(cfg *Config, owner string) bool {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return false
+	}
+	for _, existing := range cfg.Filters.IncludeOwners {
+		if strings.EqualFold(strings.TrimSpace(existing), owner) {
+			return false
+		}
+	}
+	cfg.Filters.IncludeOwners = append(cfg.Filters.IncludeOwners, owner)
+	return true
+}
+
+func RemoveIncludedOwner(cfg *Config, owner string) bool {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return false
+	}
+	next := cfg.Filters.IncludeOwners[:0]
+	removed := false
+	for _, existing := range cfg.Filters.IncludeOwners {
+		if strings.EqualFold(strings.TrimSpace(existing), owner) {
+			removed = true
+			continue
+		}
+		next = append(next, existing)
+	}
+	cfg.Filters.IncludeOwners = next
 	return removed
 }
 

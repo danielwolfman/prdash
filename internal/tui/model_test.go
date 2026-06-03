@@ -101,6 +101,50 @@ func TestLoadingRefreshKeepsCachedJobsVisible(t *testing.T) {
 	}
 }
 
+func TestRefreshReplaceRowsRemovesMissingPRs(t *testing.T) {
+	m := New(sampleDashboard("unicode"))
+	remaining := m.dashboard.Rows[1]
+
+	m.applyLoadEvent(LoadEvent{
+		Rows:        []Row{{PR: remaining.PR, Loading: true}},
+		ReplaceRows: true,
+	})
+
+	if len(m.dashboard.Rows) != 1 {
+		t.Fatalf("expected missing PRs to be removed, got %+v", m.dashboard.Rows)
+	}
+	if m.dashboard.Rows[0].PR.Number != remaining.PR.Number {
+		t.Fatalf("wrong row remained: %+v", m.dashboard.Rows[0].PR)
+	}
+	if m.dashboard.Rows[0].FetchError == "" {
+		t.Fatalf("expected cached row state to be preserved during refresh")
+	}
+}
+
+func TestFullyGreenRowGetsGreenBox(t *testing.T) {
+	now := time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC)
+	m := New(Dashboard{SnapshotAt: now, Animations: false})
+	m.width = 120
+	row := Row{
+		PR: model.PullRequest{
+			RepoFullName: "octo-org/prdash",
+			Number:       12,
+			Title:        "All green",
+			UpdatedAt:    now,
+		},
+		Runs: []model.WorkflowRun{{Jobs: []model.Job{
+			{Name: "build", State: model.CheckSuccess},
+			{Name: "optional", State: model.CheckNeutral},
+		}}},
+		LastFetched: now,
+	}
+
+	view := stripANSI(strings.Join(m.renderRow(0, row), "\n"))
+	if !strings.Contains(view, "┌") || !strings.Contains(view, "└") {
+		t.Fatalf("expected green boxed row, got:\n%s", view)
+	}
+}
+
 func TestLoadEventsMarkChangedWhenSummaryChanges(t *testing.T) {
 	now := time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC)
 	m := New(Dashboard{SnapshotAt: now, Animations: false})

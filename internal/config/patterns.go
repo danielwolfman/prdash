@@ -5,6 +5,22 @@ import (
 	"strings"
 )
 
+func RepoAllowedByOwner(fullName string, owners []string) bool {
+	if len(owners) == 0 {
+		return true
+	}
+	repoOwner := strings.TrimSpace(fullName)
+	if slash := strings.Index(repoOwner, "/"); slash >= 0 {
+		repoOwner = repoOwner[:slash]
+	}
+	for _, owner := range owners {
+		if strings.EqualFold(strings.TrimSpace(owner), repoOwner) {
+			return true
+		}
+	}
+	return false
+}
+
 func RepoExcluded(fullName string, patterns []string) bool {
 	fullName = strings.TrimSpace(strings.ToLower(fullName))
 	for _, pattern := range patterns {

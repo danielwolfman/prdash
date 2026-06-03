@@ -42,8 +42,12 @@ prdash init
 prdash doctor
 prdash auth status
 prdash config list
+prdash config include-owner my-company
+prdash config remove-owner my-company
 prdash config exclude owner/repo
 prdash config include owner/repo
+prdash config rerun enable
+prdash config rerun disable
 prdash logs path
 prdash logs tail --lines 80
 prdash version
