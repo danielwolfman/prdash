@@ -526,25 +526,20 @@ func jobPriority(state model.CheckState) int {
 func (m Model) jobLine(display displayJob) string {
 	job := display.Job
 	symbol := m.symbols.forState(job.State, m.frame)
-	workflowWidth := clamp(m.width/5, 10, 28)
-	jobWidth := clamp(m.width-workflowWidth-24, 16, 80)
 	status := string(job.State)
 	if job.Conclusion != "" {
 		status = job.Conclusion
 	}
-	text := fmt.Sprintf("%s %-*s %-*s %s",
+	jobWidth := clamp(m.width-len(status)-6, 16, 96)
+	text := fmt.Sprintf("%s %-*s %s",
 		symbol,
-		workflowWidth,
-		fitPlain(display.Workflow, workflowWidth),
 		jobWidth,
 		fitPlain(job.Name, jobWidth),
 		status,
 	)
 	if job.State == model.CheckSuccess || job.State == model.CheckNeutral {
-		text = fmt.Sprintf("%s %-*s %-*s %s",
+		text = fmt.Sprintf("%s %-*s %s",
 			symbol,
-			workflowWidth,
-			fitPlain(display.Workflow, workflowWidth),
 			jobWidth,
 			fitPlain(abbreviate(job.Name), jobWidth),
 			status,

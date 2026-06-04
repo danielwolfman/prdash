@@ -25,7 +25,6 @@ func TestViewRendersDenseDashboard(t *testing.T) {
 		"1 fail",
 		"1 run",
 		"1 ok",
-		"CI",
 		"integ",
 	} {
 		if !strings.Contains(view, want) {
@@ -43,7 +42,7 @@ func TestViewSupportsASCIISymbols(t *testing.T) {
 	if strings.Contains(view, "✓") || strings.Contains(view, "✗") || strings.Contains(view, "▸") {
 		t.Fatalf("ascii view contains unicode symbols:\n%s", view)
 	}
-	for _, want := range []string{">", "x CI", "v CI", "bld"} {
+	for _, want := range []string{">", "x integration", "v bld"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("ascii view missing %q:\n%s", want, view)
 		}
@@ -56,7 +55,7 @@ func TestNarrowViewKeepsJobRowsVisible(t *testing.T) {
 	m.height = 12
 
 	view := stripANSI(m.View())
-	if !strings.Contains(view, "CI") || !strings.Contains(view, "integration") {
+	if !strings.Contains(view, "integration") {
 		t.Fatalf("narrow view should keep job rows visible:\n%s", view)
 	}
 }
