@@ -57,6 +57,27 @@ prdash version
 
 Debug logs are enabled by default and write to the user cache directory unless `[logging].path` is set. Logs include startup/config state, loader refresh cycles, GitHub request method/status/duration, per-PR job fetch timing, rerun actions, and hot-refresh triggers. Tokens are redacted and PR titles are omitted by default.
 
+## Hooks
+
+`prdash` can run local commands when observed PR check state crosses important boundaries. Hooks are disabled by default and are configured with argv arrays so users can choose whether they want to invoke a script directly or opt into shell behavior.
+
+```toml
+[hooks]
+enabled = true
+
+[[hooks.commands]]
+event = "first_check_failure"
+command = ["/path/to/prdash-hook"]
+timeout_seconds = 60
+
+[[hooks.commands]]
+event = "checks_completed"
+command = ["/path/to/another-hook"]
+timeout_seconds = 30
+```
+
+Hook commands receive a JSON payload on stdin. `first_check_failure` fires once per visible PR head SHA when `prdash` first observes at least one failed job. `checks_completed` fires once per visible PR head SHA when all observed jobs for that head are terminal. The payload includes PR metadata, a check summary, workflow runs, failed jobs, and `primary_job` for the earliest completed failed job when one exists. Hook state is stored under the user cache directory by default; set `[hooks].state_path` to override it.
+
 ## Development
 
 ```sh

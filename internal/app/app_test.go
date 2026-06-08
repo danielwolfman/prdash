@@ -101,7 +101,7 @@ func TestConfigCommandsEditIncludedOwnersAndRerun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "my-company") || !strings.Contains(out, "allow_rerun: true") {
+	if !strings.Contains(out, "my-company") || !strings.Contains(out, "allow_rerun: true") || !strings.Contains(out, "hooks_enabled: false") {
 		t.Fatalf("unexpected config list: %q", out)
 	}
 	cfg, err := config.Load(path)

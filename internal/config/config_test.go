@@ -23,6 +23,9 @@ func TestDefaultConfigMatchesV1Decisions(t *testing.T) {
 	if cfg.Actions.AllowRerun {
 		t.Fatalf("alpha should keep rerun disabled by default")
 	}
+	if cfg.Hooks.Enabled || len(cfg.Hooks.Commands) != 0 {
+		t.Fatalf("unexpected hook defaults: %+v", cfg.Hooks)
+	}
 	if !cfg.Logging.Enabled || cfg.Logging.IncludePRTitles {
 		t.Fatalf("unexpected logging defaults: %+v", cfg.Logging)
 	}

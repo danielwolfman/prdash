@@ -16,6 +16,7 @@ type Config struct {
 	Limits  LimitsConfig  `toml:"limits"`
 	UI      UIConfig      `toml:"ui"`
 	Actions ActionsConfig `toml:"actions"`
+	Hooks   HooksConfig   `toml:"hooks"`
 	Logging LoggingConfig `toml:"logging"`
 }
 
@@ -50,6 +51,18 @@ type UIConfig struct {
 type ActionsConfig struct {
 	AllowRerun   bool `toml:"allow_rerun"`
 	ConfirmRerun bool `toml:"confirm_rerun"`
+}
+
+type HooksConfig struct {
+	Enabled   bool                `toml:"enabled"`
+	StatePath string              `toml:"state_path"`
+	Commands  []HookCommandConfig `toml:"commands"`
+}
+
+type HookCommandConfig struct {
+	Event          string   `toml:"event"`
+	Command        []string `toml:"command"`
+	TimeoutSeconds int      `toml:"timeout_seconds"`
 }
 
 type LoggingConfig struct {
@@ -92,6 +105,11 @@ func Default() Config {
 		Actions: ActionsConfig{
 			AllowRerun:   false,
 			ConfirmRerun: true,
+		},
+		Hooks: HooksConfig{
+			Enabled:   false,
+			StatePath: "",
+			Commands:  []HookCommandConfig{},
 		},
 		Logging: LoggingConfig{
 			Enabled:         true,

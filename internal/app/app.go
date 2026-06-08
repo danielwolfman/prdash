@@ -15,6 +15,7 @@ import (
 	"github.com/danielwolfman/prdash/internal/config"
 	"github.com/danielwolfman/prdash/internal/doctor"
 	ghapi "github.com/danielwolfman/prdash/internal/github"
+	"github.com/danielwolfman/prdash/internal/hooks"
 	logpkg "github.com/danielwolfman/prdash/internal/logging"
 	"github.com/danielwolfman/prdash/internal/model"
 	"github.com/danielwolfman/prdash/internal/tui"
@@ -257,7 +258,14 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 			"log_path":         logger.Path(),
 			"include_owners":   len(cfg.Filters.IncludeOwners),
 			"exclude_patterns": len(cfg.Filters.ExcludeRepos),
+			"hooks_enabled":    cfg.Hooks.Enabled,
+			"hook_commands":    len(cfg.Hooks.Commands),
 		})
+		hookDispatcher, err := hooks.NewDispatcher(cfg, logger)
+		if err != nil {
+			events <- tui.LoadEvent{Error: err.Error(), Done: true}
+			return
+		}
 
 		events <- tui.LoadEvent{Message: "checking GitHub CLI auth"}
 		status, err := auth.Status(ctx, cfg.GitHub.Host)
@@ -317,7 +325,7 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 				row := rows[i]
 				events <- tui.LoadEvent{Row: &row, TotalDiscovered: len(prs), ExcludedCount: excluded, RefreshInterval: refreshInterval}
 			}
-			streamJobFetches(ctx, client, rows, cfg.Limits.MaxConcurrentRequests, len(prs), excluded, events, logger)
+			streamJobFetches(ctx, client, rows, cfg.Limits.MaxConcurrentRequests, len(prs), excluded, events, logger, hookDispatcher)
 			events <- tui.LoadEvent{
 				Done:            true,
 				TotalDiscovered: len(prs),
@@ -370,7 +378,7 @@ func prepareRows(prs []model.PullRequest, cfg config.Config) ([]tui.Row, int) {
 	return rows, excluded
 }
 
-func streamJobFetches(ctx context.Context, client *ghapi.Client, rows []tui.Row, concurrency, totalDiscovered, excluded int, events chan<- tui.LoadEvent, logger *logpkg.Logger) {
+func streamJobFetches(ctx context.Context, client *ghapi.Client, rows []tui.Row, concurrency, totalDiscovered, excluded int, events chan<- tui.LoadEvent, logger *logpkg.Logger, hookDispatcher *hooks.Dispatcher) {
 	if concurrency <= 0 {
 		concurrency = 1
 	}
@@ -412,6 +420,7 @@ func streamJobFetches(ctx context.Context, client *ghapi.Client, rows []tui.Row,
 				"jobs":        len(allWorkflowJobs(runs)),
 				"duration_ms": time.Since(start).Milliseconds(),
 			})
+			hookDispatcher.Observe(ctx, row.PR, row.Runs)
 			events <- tui.LoadEvent{Row: &row, TotalDiscovered: totalDiscovered, ExcludedCount: excluded}
 		}(i)
 	}
@@ -549,6 +558,8 @@ func configCommand(configPath *string) *cobra.Command {
 				}
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "allow_rerun: %t\n", cfg.Actions.AllowRerun)
+			fmt.Fprintf(cmd.OutOrStdout(), "hooks_enabled: %t\n", cfg.Hooks.Enabled)
+			fmt.Fprintf(cmd.OutOrStdout(), "hook_commands: %d\n", len(cfg.Hooks.Commands))
 			return nil
 		},
 	})
