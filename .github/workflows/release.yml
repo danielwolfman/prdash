@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -22,6 +24,15 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Create main release tag
+        if: github.ref == 'refs/heads/main'
+        run: |
+          tag="v0.0.0-main.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Automated main release $tag" "$GITHUB_SHA"
+          echo "GORELEASER_CURRENT_TAG=$tag" >> "$GITHUB_ENV"
 
       - name: Release
         uses: goreleaser/goreleaser-action@v6
