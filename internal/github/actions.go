@@ -14,36 +14,43 @@ import (
 const jobsPageSize = 100
 
 func (c *Client) WorkflowRunsForSHA(ctx context.Context, owner, repo, sha string) ([]model.WorkflowRun, error) {
-	values := url.Values{}
-	values.Set("head_sha", sha)
-	values.Set("per_page", "100")
+	var runs []model.WorkflowRun
+	for page := 1; ; page++ {
+		values := url.Values{}
+		values.Set("head_sha", sha)
+		values.Set("per_page", "100")
+		values.Set("page", strconv.Itoa(page))
 
-	var response workflowRunsResponse
-	if err := c.get(ctx, repoPath(owner, repo, "/actions/runs"), values, &response); err != nil {
-		return nil, err
-	}
+		var response workflowRunsResponse
+		if err := c.get(ctx, repoPath(owner, repo, "/actions/runs"), values, &response); err != nil {
+			return nil, err
+		}
 
-	runs := make([]model.WorkflowRun, 0, len(response.WorkflowRuns))
-	for _, run := range response.WorkflowRuns {
-		if run.HeadSHA != sha {
-			continue
+		for _, run := range response.WorkflowRuns {
+			if run.HeadSHA != sha {
+				continue
+			}
+			if runExcludedFromPRSummary(run.Event) {
+				continue
+			}
+			runs = append(runs, model.WorkflowRun{
+				ID:         run.ID,
+				Name:       run.Name,
+				WorkflowID: run.WorkflowID,
+				RunNumber:  run.RunNumber,
+				RunAttempt: run.RunAttempt,
+				Event:      run.Event,
+				Status:     run.Status,
+				Conclusion: run.Conclusion,
+				URL:        run.HTMLURL,
+				HeadSHA:    run.HeadSHA,
+				UpdatedAt:  run.UpdatedAt.Time,
+			})
 		}
-		if runExcludedFromPRSummary(run.Event) {
-			continue
+
+		if len(response.WorkflowRuns) < jobsPageSize || response.TotalCount > 0 && page*jobsPageSize >= response.TotalCount {
+			break
 		}
-		runs = append(runs, model.WorkflowRun{
-			ID:         run.ID,
-			Name:       run.Name,
-			WorkflowID: run.WorkflowID,
-			RunNumber:  run.RunNumber,
-			RunAttempt: run.RunAttempt,
-			Event:      run.Event,
-			Status:     run.Status,
-			Conclusion: run.Conclusion,
-			URL:        run.HTMLURL,
-			HeadSHA:    run.HeadSHA,
-			UpdatedAt:  run.UpdatedAt.Time,
-		})
 	}
 	return collapseLatestRuns(runs), nil
 }
@@ -248,6 +255,7 @@ func firstNonEmpty(values ...string) string {
 }
 
 type workflowRunsResponse struct {
+	TotalCount   int `json:"total_count"`
 	WorkflowRuns []struct {
 		ID         int64      `json:"id"`
 		Name       string     `json:"name"`

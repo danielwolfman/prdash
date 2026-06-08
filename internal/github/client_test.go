@@ -223,6 +223,94 @@ func TestCurrentWorkflowRunsWithJobs(t *testing.T) {
 	}
 }
 
+func TestCurrentWorkflowRunsWithJobsPaginatesPastDispatchRuns(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repos/octo-org/prdash/actions/runs":
+			if got := r.URL.Query().Get("head_sha"); got != "abc123" {
+				t.Fatalf("head_sha = %q", got)
+			}
+			switch r.URL.Query().Get("page") {
+			case "1":
+				dispatchRuns := make([]map[string]any, 0, 100)
+				for i := 0; i < 100; i++ {
+					dispatchRuns = append(dispatchRuns, map[string]any{
+						"id":          1000 + i,
+						"name":        "Agent Lab Test",
+						"workflow_id": 99,
+						"run_number":  2000 + i,
+						"run_attempt": 1,
+						"event":       "workflow_dispatch",
+						"status":      "completed",
+						"conclusion":  "success",
+						"html_url":    fmt.Sprintf("https://github.com/octo-org/prdash/actions/runs/%d", 1000+i),
+						"head_sha":    "abc123",
+						"updated_at":  "2026-06-02T14:00:00Z",
+					})
+				}
+				writeJSON(t, w, map[string]any{"total_count": 101, "workflow_runs": dispatchRuns})
+			case "2":
+				writeJSON(t, w, map[string]any{
+					"total_count": 101,
+					"workflow_runs": []map[string]any{
+						{
+							"id":          10,
+							"name":        "CI",
+							"workflow_id": 1,
+							"run_number":  7,
+							"run_attempt": 1,
+							"event":       "pull_request",
+							"status":      "completed",
+							"conclusion":  "failure",
+							"html_url":    "https://github.com/octo-org/prdash/actions/runs/10",
+							"head_sha":    "abc123",
+							"updated_at":  "2026-06-01T14:00:00Z",
+						},
+					},
+				})
+			default:
+				t.Fatalf("unexpected page: %s", r.URL.Query().Get("page"))
+			}
+		case r.URL.Path == "/repos/octo-org/prdash/actions/runs/10/attempts/1/jobs":
+			writeJSON(t, w, map[string]any{
+				"jobs": []map[string]any{
+					{
+						"id":           100,
+						"name":         "summary",
+						"status":       "completed",
+						"conclusion":   "failure",
+						"html_url":     "https://github.com/octo-org/prdash/actions/runs/10/job/100",
+						"started_at":   "2026-06-01T14:00:00Z",
+						"completed_at": "2026-06-01T14:02:00Z",
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token", WithBaseURLs(server.URL, server.URL+"/graphql"))
+	runs, err := client.CurrentWorkflowRunsWithJobs(context.Background(), model.PullRequest{
+		Owner:   "octo-org",
+		Repo:    "prdash",
+		HeadSHA: "abc123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("len(runs) = %d, want 1: %+v", len(runs), runs)
+	}
+	if runs[0].ID != 10 || runs[0].Event != "pull_request" {
+		t.Fatalf("expected paginated pull_request run, got %+v", runs[0])
+	}
+	if len(runs[0].Jobs) != 1 || runs[0].Jobs[0].Name != "summary" || runs[0].Jobs[0].State != model.CheckFailure {
+		t.Fatalf("unexpected jobs: %+v", runs[0].Jobs)
+	}
+}
+
 func TestPullRequestActivities(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/graphql" {
