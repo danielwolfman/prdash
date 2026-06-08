@@ -87,6 +87,43 @@ func TestDispatcherDoesNotCompleteWhileChecksAreRunning(t *testing.T) {
 	}
 }
 
+func TestDispatcherBaselinesThenFiresNewPRActivity(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	initial := []model.PullRequestActivity{
+		{
+			ID:        "IC_1",
+			Kind:      model.ActivityIssueComment,
+			Author:    "reviewer",
+			URL:       "https://github.com/octo-org/prdash/pull/7#issuecomment-1",
+			BodyText:  "existing comment",
+			CreatedAt: time.Date(2026, 6, 8, 8, 0, 0, 0, time.UTC),
+		},
+	}
+
+	dispatcher.ObserveActivities(context.Background(), pr, initial)
+	calls.assertNoMore(t)
+
+	dispatcher.ObserveActivities(context.Background(), pr, append(initial, model.PullRequestActivity{
+		ID:        "PRR_1",
+		Kind:      model.ActivityPullRequestReview,
+		Author:    "maintainer",
+		URL:       "https://github.com/octo-org/prdash/pull/7#pullrequestreview-1",
+		BodyText:  "please fix",
+		State:     "CHANGES_REQUESTED",
+		CreatedAt: time.Date(2026, 6, 8, 8, 5, 0, 0, time.UTC),
+	}))
+
+	gotCalls := calls.collect(t, 1)
+	if gotCalls[0].Event != EventNewPRActivity {
+		t.Fatalf("event = %q, want %q", gotCalls[0].Event, EventNewPRActivity)
+	}
+	if gotCalls[0].Activity == nil || gotCalls[0].Activity.Kind != model.ActivityPullRequestReview || gotCalls[0].Activity.State != "CHANGES_REQUESTED" {
+		t.Fatalf("activity payload = %#v", gotCalls[0].Activity)
+	}
+	calls.assertNoMore(t)
+}
+
 func TestRunCommandSendsPayloadOnStdin(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "payload.json")
@@ -166,6 +203,7 @@ func testDispatcher(t *testing.T) (*Dispatcher, payloadCollector) {
 	cfg.Hooks.Commands = []config.HookCommandConfig{
 		{Event: EventFirstCheckFailure, Command: []string{"hook"}},
 		{Event: EventChecksCompleted, Command: []string{"hook"}},
+		{Event: EventNewPRActivity, Command: []string{"hook"}},
 	}
 	dispatcher, err := NewDispatcher(cfg, nil)
 	if err != nil {

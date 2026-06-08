@@ -20,6 +20,7 @@ import (
 const (
 	EventFirstCheckFailure = "first_check_failure"
 	EventChecksCompleted   = "checks_completed"
+	EventNewPRActivity     = "new_pr_comment_or_review"
 )
 
 const defaultTimeout = 30 * time.Second
@@ -46,15 +47,16 @@ type Dispatcher struct {
 }
 
 type Payload struct {
-	SchemaVersion int            `json:"schema_version"`
-	Event         string         `json:"event"`
-	ObservedAt    string         `json:"observed_at"`
-	GitHubHost    string         `json:"github_host"`
-	PR            PRPayload      `json:"pr"`
-	Summary       SummaryPayload `json:"summary"`
-	PrimaryJob    *JobPayload    `json:"primary_job,omitempty"`
-	FailedJobs    []JobPayload   `json:"failed_jobs,omitempty"`
-	WorkflowRuns  []RunPayload   `json:"workflow_runs"`
+	SchemaVersion int              `json:"schema_version"`
+	Event         string           `json:"event"`
+	ObservedAt    string           `json:"observed_at"`
+	GitHubHost    string           `json:"github_host"`
+	PR            PRPayload        `json:"pr"`
+	Summary       SummaryPayload   `json:"summary"`
+	Activity      *ActivityPayload `json:"activity,omitempty"`
+	PrimaryJob    *JobPayload      `json:"primary_job,omitempty"`
+	FailedJobs    []JobPayload     `json:"failed_jobs,omitempty"`
+	WorkflowRuns  []RunPayload     `json:"workflow_runs"`
 }
 
 type PRPayload struct {
@@ -112,8 +114,20 @@ type JobPayload struct {
 	CompletedAt string           `json:"completed_at,omitempty"`
 }
 
+type ActivityPayload struct {
+	ID        string                        `json:"id"`
+	Kind      model.PullRequestActivityKind `json:"kind"`
+	Author    string                        `json:"author"`
+	URL       string                        `json:"url"`
+	BodyText  string                        `json:"body_text"`
+	State     string                        `json:"state,omitempty"`
+	CreatedAt string                        `json:"created_at,omitempty"`
+	UpdatedAt string                        `json:"updated_at,omitempty"`
+}
+
 type stateFile struct {
-	PRHeads map[string]headState `json:"pr_heads"`
+	PRHeads      map[string]headState     `json:"pr_heads"`
+	PRActivities map[string]activityState `json:"pr_activities"`
 }
 
 type headState struct {
@@ -121,6 +135,12 @@ type headState struct {
 	ChecksCompletedFired   bool   `json:"checks_completed_fired,omitempty"`
 	LastState              string `json:"last_state,omitempty"`
 	UpdatedAt              string `json:"updated_at,omitempty"`
+}
+
+type activityState struct {
+	Initialized bool              `json:"initialized,omitempty"`
+	Seen        map[string]string `json:"seen,omitempty"`
+	UpdatedAt   string            `json:"updated_at,omitempty"`
 }
 
 func NewDispatcher(cfg config.Config, logger Logger) (*Dispatcher, error) {
@@ -137,7 +157,10 @@ func NewDispatcher(cfg config.Config, logger Logger) (*Dispatcher, error) {
 		logger:    logger,
 		execute:   runCommand,
 		now:       time.Now,
-		state:     stateFile{PRHeads: map[string]headState{}},
+		state: stateFile{
+			PRHeads:      map[string]headState{},
+			PRActivities: map[string]activityState{},
+		},
 	}
 	if dispatcher.enabled {
 		if err := dispatcher.loadState(); err != nil {
@@ -145,6 +168,18 @@ func NewDispatcher(cfg config.Config, logger Logger) (*Dispatcher, error) {
 		}
 	}
 	return dispatcher, nil
+}
+
+func (d *Dispatcher) WantsPullRequestActivity() bool {
+	if d == nil || !d.enabled {
+		return false
+	}
+	for _, command := range d.commands {
+		if command.Event == EventNewPRActivity {
+			return true
+		}
+	}
+	return false
 }
 
 func ResolveStatePath(explicit string) (string, error) {
@@ -185,6 +220,64 @@ func (d *Dispatcher) Observe(ctx context.Context, pr model.PullRequest, runs []m
 	head.LastState = string(summary.State)
 	head.UpdatedAt = now.Format(time.RFC3339Nano)
 	d.state.PRHeads[key] = head
+	if len(payloads) > 0 {
+		if err := d.saveStateLocked(); err != nil && d.logger != nil {
+			d.logger.Error("hook_state_save_error", map[string]any{
+				"state_path": d.statePath,
+				"error":      err.Error(),
+			})
+		}
+	}
+	d.mu.Unlock()
+
+	for _, payload := range payloads {
+		d.dispatch(ctx, payload)
+	}
+}
+
+func (d *Dispatcher) ObserveActivities(ctx context.Context, pr model.PullRequest, activities []model.PullRequestActivity) {
+	if d == nil || !d.enabled || !d.WantsPullRequestActivity() {
+		return
+	}
+	key := activityStateKey(pr)
+	now := d.now().UTC()
+
+	var payloads []Payload
+	d.mu.Lock()
+	state := d.state.PRActivities[key]
+	if state.Seen == nil {
+		state.Seen = map[string]string{}
+	}
+	if !state.Initialized {
+		for _, activity := range activities {
+			if activity.ID != "" {
+				state.Seen[activity.ID] = string(activity.Kind)
+			}
+		}
+		state.Initialized = true
+		state.UpdatedAt = now.Format(time.RFC3339Nano)
+		d.state.PRActivities[key] = state
+		if err := d.saveStateLocked(); err != nil && d.logger != nil {
+			d.logger.Error("hook_state_save_error", map[string]any{
+				"state_path": d.statePath,
+				"error":      err.Error(),
+			})
+		}
+		d.mu.Unlock()
+		return
+	}
+	for _, activity := range activities {
+		if activity.ID == "" {
+			continue
+		}
+		if _, ok := state.Seen[activity.ID]; ok {
+			continue
+		}
+		state.Seen[activity.ID] = string(activity.Kind)
+		payloads = append(payloads, d.activityPayload(EventNewPRActivity, now, pr, activity))
+	}
+	state.UpdatedAt = now.Format(time.RFC3339Nano)
+	d.state.PRActivities[key] = state
 	if len(payloads) > 0 {
 		if err := d.saveStateLocked(); err != nil && d.logger != nil {
 			d.logger.Error("hook_state_save_error", map[string]any{
@@ -253,19 +346,7 @@ func (d *Dispatcher) payload(event string, observedAt time.Time, pr model.PullRe
 		Event:         event,
 		ObservedAt:    observedAt.Format(time.RFC3339Nano),
 		GitHubHost:    d.host,
-		PR: PRPayload{
-			Owner:            pr.Owner,
-			Repo:             pr.Repo,
-			RepoFullName:     pr.RepoFullName,
-			Number:           pr.Number,
-			URL:              pr.URL,
-			IsDraft:          pr.IsDraft,
-			HeadRefName:      pr.HeadRefName,
-			HeadSHA:          pr.HeadSHA,
-			BaseRefName:      pr.BaseRefName,
-			MergeStateStatus: pr.MergeStateStatus,
-			ReviewDecision:   pr.ReviewDecision,
-		},
+		PR:            prPayload(pr),
 		Summary: SummaryPayload{
 			State:          summary.State,
 			Total:          summary.Total,
@@ -282,6 +363,43 @@ func (d *Dispatcher) payload(event string, observedAt time.Time, pr model.PullRe
 		PrimaryJob:   primary,
 		FailedJobs:   failedJobs,
 		WorkflowRuns: runPayloads(runs),
+	}
+}
+
+func (d *Dispatcher) activityPayload(event string, observedAt time.Time, pr model.PullRequest, activity model.PullRequestActivity) Payload {
+	return Payload{
+		SchemaVersion: 1,
+		Event:         event,
+		ObservedAt:    observedAt.Format(time.RFC3339Nano),
+		GitHubHost:    d.host,
+		PR:            prPayload(pr),
+		Activity: &ActivityPayload{
+			ID:        activity.ID,
+			Kind:      activity.Kind,
+			Author:    activity.Author,
+			URL:       activity.URL,
+			BodyText:  activity.BodyText,
+			State:     activity.State,
+			CreatedAt: formatTime(activity.CreatedAt),
+			UpdatedAt: formatTime(activity.UpdatedAt),
+		},
+		WorkflowRuns: []RunPayload{},
+	}
+}
+
+func prPayload(pr model.PullRequest) PRPayload {
+	return PRPayload{
+		Owner:            pr.Owner,
+		Repo:             pr.Repo,
+		RepoFullName:     pr.RepoFullName,
+		Number:           pr.Number,
+		URL:              pr.URL,
+		IsDraft:          pr.IsDraft,
+		HeadRefName:      pr.HeadRefName,
+		HeadSHA:          pr.HeadSHA,
+		BaseRefName:      pr.BaseRefName,
+		MergeStateStatus: pr.MergeStateStatus,
+		ReviewDecision:   pr.ReviewDecision,
 	}
 }
 
@@ -346,10 +464,14 @@ func (d *Dispatcher) loadState() error {
 		if d.state.PRHeads == nil {
 			d.state.PRHeads = map[string]headState{}
 		}
+		if d.state.PRActivities == nil {
+			d.state.PRActivities = map[string]activityState{}
+		}
 		return nil
 	}
 	if os.IsNotExist(err) {
 		d.state.PRHeads = map[string]headState{}
+		d.state.PRActivities = map[string]activityState{}
 		return nil
 	}
 	return err
@@ -358,6 +480,9 @@ func (d *Dispatcher) loadState() error {
 func (d *Dispatcher) saveStateLocked() error {
 	if d.state.PRHeads == nil {
 		d.state.PRHeads = map[string]headState{}
+	}
+	if d.state.PRActivities == nil {
+		d.state.PRActivities = map[string]activityState{}
 	}
 	data, err := json.MarshalIndent(d.state, "", "  ")
 	if err != nil {
@@ -372,6 +497,10 @@ func (d *Dispatcher) saveStateLocked() error {
 
 func stateKey(pr model.PullRequest) string {
 	return fmt.Sprintf("%s#%d@%s", strings.ToLower(pr.RepoFullName), pr.Number, pr.HeadSHA)
+}
+
+func activityStateKey(pr model.PullRequest) string {
+	return fmt.Sprintf("%s#%d", strings.ToLower(pr.RepoFullName), pr.Number)
 }
 
 func checksTerminal(summary model.CheckSummary) bool {

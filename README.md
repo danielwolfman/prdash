@@ -74,9 +74,14 @@ timeout_seconds = 60
 event = "checks_completed"
 command = ["/path/to/another-hook"]
 timeout_seconds = 30
+
+[[hooks.commands]]
+event = "new_pr_comment_or_review"
+command = ["/path/to/pr-activity-hook"]
+timeout_seconds = 60
 ```
 
-Hook commands receive a JSON payload on stdin. `first_check_failure` fires once per visible PR head SHA when `prdash` first observes at least one failed job. `checks_completed` fires once per visible PR head SHA when all observed jobs for that head are terminal. The payload includes PR metadata, a check summary, workflow runs, failed jobs, and `primary_job` for the earliest completed failed job when one exists. Hook state is stored under the user cache directory by default; set `[hooks].state_path` to override it.
+Hook commands receive a JSON payload on stdin. `first_check_failure` fires once per visible PR head SHA when `prdash` first observes at least one failed job. `checks_completed` fires once per visible PR head SHA when all observed jobs for that head are terminal. `new_pr_comment_or_review` establishes a baseline on first observation, then fires for newly observed top-level PR comments and submitted PR reviews. The payload includes PR metadata, a check summary, workflow runs, failed jobs, and `primary_job` for check events; PR activity events include an `activity` object with the activity kind, author, URL, body text, state, and timestamps. Hook state is stored under the user cache directory by default; set `[hooks].state_path` to override it.
 
 ## Development
 

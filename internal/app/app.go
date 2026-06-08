@@ -421,6 +421,18 @@ func streamJobFetches(ctx context.Context, client *ghapi.Client, rows []tui.Row,
 				"duration_ms": time.Since(start).Milliseconds(),
 			})
 			hookDispatcher.Observe(ctx, row.PR, row.Runs)
+			if hookDispatcher.WantsPullRequestActivity() {
+				activities, err := client.PullRequestActivities(ctx, row.PR, 20)
+				if err != nil {
+					logger.Warn("pr_activity_fetch_error", map[string]any{
+						"repo":      row.PR.RepoFullName,
+						"pr_number": row.PR.Number,
+						"error":     err.Error(),
+					})
+				} else {
+					hookDispatcher.ObserveActivities(ctx, row.PR, activities)
+				}
+			}
 			events <- tui.LoadEvent{Row: &row, TotalDiscovered: totalDiscovered, ExcludedCount: excluded}
 		}(i)
 	}
@@ -473,8 +485,9 @@ func estimateRefreshRequests(visibleRows int) int {
 		return 2
 	}
 	// Each row needs one run-list request plus one or more job-list pages. Large
-	// matrix workflows commonly spill past GitHub's 100-job page size.
-	return 2 + visibleRows*5
+	// matrix workflows commonly spill past GitHub's 100-job page size. Hooked
+	// PR activity adds one GraphQL request per row when configured.
+	return 2 + visibleRows*6
 }
 
 func waitForRefresh(ctx context.Context, refresh <-chan struct{}, d time.Duration) (bool, error) {

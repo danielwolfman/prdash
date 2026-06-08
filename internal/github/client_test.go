@@ -223,6 +223,77 @@ func TestCurrentWorkflowRunsWithJobs(t *testing.T) {
 	}
 }
 
+func TestPullRequestActivities(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/graphql" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req graphqlRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(req.Query, "PullRequestActivities") {
+			t.Fatalf("unexpected graphql query: %s", req.Query)
+		}
+		if req.Variables["owner"] != "octo-org" || req.Variables["repo"] != "prdash" || req.Variables["number"] != float64(12) && req.Variables["number"] != 12 {
+			t.Fatalf("unexpected variables: %#v", req.Variables)
+		}
+		writeJSON(t, w, map[string]any{
+			"data": map[string]any{
+				"repository": map[string]any{
+					"pullRequest": map[string]any{
+						"comments": map[string]any{
+							"nodes": []map[string]any{
+								{
+									"id":        "IC_1",
+									"author":    map[string]any{"login": "reviewer"},
+									"bodyText":  "please update this",
+									"url":       "https://github.com/octo-org/prdash/pull/12#issuecomment-1",
+									"createdAt": "2026-06-01T14:00:00Z",
+									"updatedAt": "2026-06-01T14:00:00Z",
+								},
+							},
+						},
+						"reviews": map[string]any{
+							"nodes": []map[string]any{
+								{
+									"id":        "PRR_1",
+									"author":    map[string]any{"login": "maintainer"},
+									"bodyText":  "changes requested",
+									"url":       "https://github.com/octo-org/prdash/pull/12#pullrequestreview-1",
+									"state":     "CHANGES_REQUESTED",
+									"createdAt": "2026-06-01T14:05:00Z",
+									"updatedAt": "2026-06-01T14:05:00Z",
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token", WithBaseURLs(server.URL, server.URL+"/graphql"))
+	activities, err := client.PullRequestActivities(context.Background(), model.PullRequest{
+		Owner:  "octo-org",
+		Repo:   "prdash",
+		Number: 12,
+	}, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activities) != 2 {
+		t.Fatalf("len(activities) = %d, want 2", len(activities))
+	}
+	if activities[0].Kind != model.ActivityIssueComment || activities[0].Author != "reviewer" {
+		t.Fatalf("unexpected first activity: %+v", activities[0])
+	}
+	if activities[1].Kind != model.ActivityPullRequestReview || activities[1].State != "CHANGES_REQUESTED" {
+		t.Fatalf("unexpected second activity: %+v", activities[1])
+	}
+}
+
 func TestCurrentWorkflowRunsWithJobsFallsBackToCheckRuns(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

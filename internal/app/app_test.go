@@ -38,7 +38,7 @@ func TestCalculateRefreshIntervalExpandsWithLargeVisibleSet(t *testing.T) {
 
 func TestEstimateRefreshRequestsAllowsPaginatedJobLists(t *testing.T) {
 	got := estimateRefreshRequests(40)
-	want := 202
+	want := 242
 	if got != want {
 		t.Fatalf("estimated requests = %d, want %d", got, want)
 	}
