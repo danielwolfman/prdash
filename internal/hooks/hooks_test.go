@@ -87,6 +87,30 @@ func TestDispatcherDoesNotCompleteWhileChecksAreRunning(t *testing.T) {
 	}
 }
 
+func TestDispatcherTreatsDirtyMergeStateAsFirstFailure(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	pr.MergeStateStatus = "DIRTY"
+
+	dispatcher.Observe(context.Background(), pr, nil)
+	dispatcher.Observe(context.Background(), pr, nil)
+
+	gotCalls := calls.collect(t, 1)
+	if gotCalls[0].Event != EventFirstCheckFailure {
+		t.Fatalf("event = %q, want %q", gotCalls[0].Event, EventFirstCheckFailure)
+	}
+	if gotCalls[0].Summary.State != model.CheckFailure {
+		t.Fatalf("summary state = %q, want %q", gotCalls[0].Summary.State, model.CheckFailure)
+	}
+	if gotCalls[0].PR.MergeStateStatus != "DIRTY" {
+		t.Fatalf("merge state = %q, want DIRTY", gotCalls[0].PR.MergeStateStatus)
+	}
+	if gotCalls[0].PrimaryJob != nil {
+		t.Fatalf("primary job = %#v, want nil for dirty-only failure", gotCalls[0].PrimaryJob)
+	}
+	calls.assertNoMore(t)
+}
+
 func TestDispatcherBaselinesThenFiresNewPRActivity(t *testing.T) {
 	dispatcher, calls := testDispatcher(t)
 	pr := testPR()

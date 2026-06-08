@@ -199,17 +199,21 @@ func (d *Dispatcher) Observe(ctx context.Context, pr model.PullRequest, runs []m
 	}
 
 	jobs := allJobs(runs)
-	if len(jobs) == 0 {
+	mergeDirty := isDirtyMergeState(pr.MergeStateStatus)
+	if len(jobs) == 0 && !mergeDirty {
 		return
 	}
 	summary := model.SummarizeJobs(jobs)
+	if mergeDirty && summary.Failure == 0 {
+		summary.State = model.CheckFailure
+	}
 	key := stateKey(pr)
 	now := d.now().UTC()
 
 	var payloads []Payload
 	d.mu.Lock()
 	head := d.state.PRHeads[key]
-	if summary.Failure > 0 && !head.FirstCheckFailureFired {
+	if firstFailureObserved(summary, mergeDirty) && !head.FirstCheckFailureFired {
 		head.FirstCheckFailureFired = true
 		payloads = append(payloads, d.payload(EventFirstCheckFailure, now, pr, runs, summary))
 	}
@@ -509,6 +513,14 @@ func checksTerminal(summary model.CheckSummary) bool {
 		summary.Waiting == 0 &&
 		summary.Unknown == 0 &&
 		summary.Stale == 0
+}
+
+func firstFailureObserved(summary model.CheckSummary, mergeDirty bool) bool {
+	return summary.Failure > 0 || mergeDirty
+}
+
+func isDirtyMergeState(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), "DIRTY")
 }
 
 func allJobs(runs []model.WorkflowRun) []model.Job {
