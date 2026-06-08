@@ -1,22 +1,8 @@
 # prdash
 
-`prdash` is a local terminal dashboard for GitHub pull requests authored by the authenticated user. The v1 goal is a dense, colorful TUI that shows open authored PRs, current-head GitHub Actions jobs, adaptive refresh state, and confirmed rerun actions.
+`prdash` is a local terminal dashboard for GitHub pull requests authored by the authenticated user. It shows open authored PRs, current-head GitHub Actions jobs, adaptive refresh state, event hooks, and confirmed rerun actions.
 
-This repository is public for early release testing. The current release is usable, but still being dogfooded and hardened.
-
-## Planned v1 Shape
-
-- Local terminal app built with Go and Bubble Tea.
-- Authenticates through the GitHub CLI in v1.
-- Shows open PRs authored by the logged-in GitHub user.
-- Loads per-job check detail for the top 40 visible PRs, sorted by PR update time.
-- Uses adaptive refresh scheduling to stay inside GitHub API budgets.
-- Supports confirmed rerun actions when the token has `workflow` scope.
-- Writes token-redacted debug logs by default.
-
-## Current Status
-
-Private QA release `v0.1.0` is available. CLI skeleton, config defaults, `init`, `version`, repo filter commands, debug log commands, GitHub CLI auth inspection, doctor checks, GitHub GraphQL PR discovery, paginated REST Actions workflow/job fetching, status normalization, mocked API tests, dense TUI behavior, confirmed PR-level rerun, release build metadata, Makefile targets, CI, and GoReleaser packaging are implemented.
+![prdash preview](docs/assets/prdash-preview.png)
 
 ## Install
 
@@ -188,25 +174,6 @@ make build
 go run ./cmd/prdash
 go run ./cmd/prdash --limit 3
 go run ./cmd/prdash --limit 3 --allow-rerun
-```
-
-Build metadata is injected with `-ldflags` into `prdash version`:
-
-```sh
-make build VERSION=v0.1.0 COMMIT=$(git rev-parse --short HEAD)
-```
-
-To test release packaging locally:
-
-```sh
-make snapshot
-```
-
-To publish a release, push a semver tag:
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
 ```
 
 The default command opens the TUI immediately, discovers authored open PRs, then fills in current GitHub Actions jobs as background workers complete. It refreshes on a conservative interval derived from the configured rate budget, marks stale rows, and highlights status changes. Press `j`/`k` or arrows to move across PRs and visible jobs, `o` to open the selected PR or job in Chrome/browser, and `q` to quit. Use `--limit 3` for a faster local smoke test.
