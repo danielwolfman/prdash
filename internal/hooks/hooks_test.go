@@ -87,6 +87,146 @@ func TestDispatcherDoesNotCompleteWhileChecksAreRunning(t *testing.T) {
 	}
 }
 
+func TestDispatcherFiresCompletionAgainAfterRerun(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+
+	dispatcher.Observe(context.Background(), pr, []model.WorkflowRun{{
+		ID:         10,
+		Name:       "ci",
+		RunAttempt: 1,
+		HeadSHA:    pr.HeadSHA,
+		Jobs: []model.Job{
+			{
+				ID:          101,
+				RunID:       10,
+				Name:        "unit",
+				State:       model.CheckFailure,
+				Status:      "completed",
+				Conclusion:  "failure",
+				CompletedAt: time.Date(2026, 6, 8, 8, 1, 0, 0, time.UTC),
+			},
+		},
+	}})
+	initialCalls := calls.collect(t, 2)
+	if _, ok := findPayload(initialCalls, EventFirstCheckFailure); !ok {
+		t.Fatalf("events = %#v, want %q", initialCalls, EventFirstCheckFailure)
+	}
+	if _, ok := findPayload(initialCalls, EventChecksCompleted); !ok {
+		t.Fatalf("events = %#v, want %q", initialCalls, EventChecksCompleted)
+	}
+
+	dispatcher.Observe(context.Background(), pr, []model.WorkflowRun{{
+		ID:         10,
+		Name:       "ci",
+		RunAttempt: 2,
+		HeadSHA:    pr.HeadSHA,
+		Jobs: []model.Job{
+			{ID: 201, RunID: 10, Name: "unit", State: model.CheckRunning, Status: "in_progress"},
+		},
+	}})
+	calls.assertNoMore(t)
+
+	dispatcher.Observe(context.Background(), pr, []model.WorkflowRun{{
+		ID:         10,
+		Name:       "ci",
+		RunAttempt: 2,
+		HeadSHA:    pr.HeadSHA,
+		Jobs: []model.Job{
+			{
+				ID:          201,
+				RunID:       10,
+				Name:        "unit",
+				State:       model.CheckSuccess,
+				Status:      "completed",
+				Conclusion:  "success",
+				CompletedAt: time.Date(2026, 6, 8, 8, 10, 0, 0, time.UTC),
+			},
+		},
+	}})
+
+	rerunCalls := calls.collect(t, 1)
+	if rerunCalls[0].Event != EventChecksCompleted {
+		t.Fatalf("event = %q, want %q", rerunCalls[0].Event, EventChecksCompleted)
+	}
+	if rerunCalls[0].Summary.State != model.CheckSuccess {
+		t.Fatalf("summary state = %q, want %q", rerunCalls[0].Summary.State, model.CheckSuccess)
+	}
+	calls.assertNoMore(t)
+}
+
+func TestDispatcherFiresCompletionForLegacyStateAfterRerun(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	key := stateKey(pr)
+	dispatcher.state.PRHeads[key] = headState{
+		FirstCheckFailureFired: true,
+		ChecksCompletedFired:   true,
+		LastState:              string(model.CheckRunning),
+	}
+
+	dispatcher.Observe(context.Background(), pr, []model.WorkflowRun{{
+		ID:         10,
+		Name:       "ci",
+		RunAttempt: 2,
+		HeadSHA:    pr.HeadSHA,
+		Jobs: []model.Job{
+			{
+				ID:          201,
+				RunID:       10,
+				Name:        "unit",
+				State:       model.CheckSuccess,
+				Status:      "completed",
+				Conclusion:  "success",
+				CompletedAt: time.Date(2026, 6, 8, 8, 10, 0, 0, time.UTC),
+			},
+		},
+	}})
+
+	gotCalls := calls.collect(t, 1)
+	if gotCalls[0].Event != EventChecksCompleted {
+		t.Fatalf("event = %q, want %q", gotCalls[0].Event, EventChecksCompleted)
+	}
+	if dispatcher.state.PRHeads[key].LastChecksCompletedKey == "" {
+		t.Fatal("last checks completed key was not recorded")
+	}
+	calls.assertNoMore(t)
+}
+
+func TestDispatcherDoesNotDuplicateLegacyTerminalCompletion(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	key := stateKey(pr)
+	dispatcher.state.PRHeads[key] = headState{
+		FirstCheckFailureFired: true,
+		ChecksCompletedFired:   true,
+		LastState:              string(model.CheckFailure),
+	}
+
+	dispatcher.Observe(context.Background(), pr, []model.WorkflowRun{{
+		ID:         10,
+		Name:       "ci",
+		RunAttempt: 1,
+		HeadSHA:    pr.HeadSHA,
+		Jobs: []model.Job{
+			{
+				ID:          101,
+				RunID:       10,
+				Name:        "unit",
+				State:       model.CheckFailure,
+				Status:      "completed",
+				Conclusion:  "failure",
+				CompletedAt: time.Date(2026, 6, 8, 8, 1, 0, 0, time.UTC),
+			},
+		},
+	}})
+
+	if dispatcher.state.PRHeads[key].LastChecksCompletedKey == "" {
+		t.Fatal("last checks completed key was not recorded")
+	}
+	calls.assertNoMore(t)
+}
+
 func TestDispatcherTreatsDirtyMergeStateAsFirstFailure(t *testing.T) {
 	dispatcher, calls := testDispatcher(t)
 	pr := testPR()

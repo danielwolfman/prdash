@@ -72,7 +72,7 @@ Hook commands receive a JSON payload on stdin. Hook state is stored under the us
 Supported events:
 
 - `first_check_failure`: fires once per visible PR head SHA when `prdash` first observes at least one failed job, or when GitHub reports the PR merge state as `DIRTY`.
-- `checks_completed`: fires once per visible PR head SHA when all observed jobs for that head are terminal, whether the final result is success, failure, cancellation, neutral, or action required.
+- `checks_completed`: fires when all observed jobs for a visible PR head reach a terminal state, whether the final result is success, failure, cancellation, neutral, or action required. If checks are rerun or replaced and `prdash` observes that head move back to a non-terminal state, it fires again when the new check epoch completes.
 - `new_pr_comment_or_review`: establishes a baseline on first observation, then fires for newly observed top-level PR comments and submitted PR reviews.
 
 Check-event payloads include PR metadata, a check summary, workflow runs, failed jobs, and `primary_job` for the earliest completed failed job when one exists. Dirty merge-state events may have no failed jobs and no `primary_job`; use `pr.merge_state_status` to identify that case. PR activity payloads include an `activity` object with the activity kind, author, URL, body text, review state, and timestamps.

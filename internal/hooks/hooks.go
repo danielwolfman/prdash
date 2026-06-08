@@ -3,6 +3,7 @@ package hooks
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -133,6 +134,7 @@ type stateFile struct {
 type headState struct {
 	FirstCheckFailureFired bool   `json:"first_check_failure_fired,omitempty"`
 	ChecksCompletedFired   bool   `json:"checks_completed_fired,omitempty"`
+	LastChecksCompletedKey string `json:"last_checks_completed_key,omitempty"`
 	LastState              string `json:"last_state,omitempty"`
 	UpdatedAt              string `json:"updated_at,omitempty"`
 }
@@ -211,20 +213,35 @@ func (d *Dispatcher) Observe(ctx context.Context, pr model.PullRequest, runs []m
 	now := d.now().UTC()
 
 	var payloads []Payload
+	var stateChanged bool
 	d.mu.Lock()
 	head := d.state.PRHeads[key]
 	if firstFailureObserved(summary, mergeDirty) && !head.FirstCheckFailureFired {
 		head.FirstCheckFailureFired = true
 		payloads = append(payloads, d.payload(EventFirstCheckFailure, now, pr, runs, summary))
+		stateChanged = true
 	}
-	if checksTerminal(summary) && !head.ChecksCompletedFired {
-		head.ChecksCompletedFired = true
-		payloads = append(payloads, d.payload(EventChecksCompleted, now, pr, runs, summary))
+	if checksTerminal(summary) {
+		completionKey := checksCompletionKey(runs, summary)
+		if shouldFireChecksCompleted(head, completionKey) {
+			head.ChecksCompletedFired = true
+			head.LastChecksCompletedKey = completionKey
+			payloads = append(payloads, d.payload(EventChecksCompleted, now, pr, runs, summary))
+			stateChanged = true
+		} else if head.ChecksCompletedFired && head.LastChecksCompletedKey == "" && isTerminalState(head.LastState) {
+			head.LastChecksCompletedKey = completionKey
+			stateChanged = true
+		}
 	}
-	head.LastState = string(summary.State)
-	head.UpdatedAt = now.Format(time.RFC3339Nano)
+	if head.LastState != string(summary.State) {
+		head.LastState = string(summary.State)
+		stateChanged = true
+	}
+	if stateChanged {
+		head.UpdatedAt = now.Format(time.RFC3339Nano)
+	}
 	d.state.PRHeads[key] = head
-	if len(payloads) > 0 {
+	if stateChanged {
 		if err := d.saveStateLocked(); err != nil && d.logger != nil {
 			d.logger.Error("hook_state_save_error", map[string]any{
 				"state_path": d.statePath,
@@ -517,6 +534,66 @@ func checksTerminal(summary model.CheckSummary) bool {
 
 func firstFailureObserved(summary model.CheckSummary, mergeDirty bool) bool {
 	return summary.Failure > 0 || mergeDirty
+}
+
+func shouldFireChecksCompleted(head headState, completionKey string) bool {
+	if !head.ChecksCompletedFired {
+		return true
+	}
+	if head.LastChecksCompletedKey != "" {
+		return completionKey != head.LastChecksCompletedKey
+	}
+	return !isTerminalState(head.LastState)
+}
+
+func isTerminalState(value string) bool {
+	switch model.CheckState(strings.TrimSpace(value)) {
+	case model.CheckActionRequired, model.CheckFailure, model.CheckCancelled, model.CheckSuccess, model.CheckNeutral:
+		return true
+	default:
+		return false
+	}
+}
+
+func checksCompletionKey(runs []model.WorkflowRun, summary model.CheckSummary) string {
+	parts := []string{
+		fmt.Sprintf("summary:%s:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d",
+			summary.State,
+			summary.Total,
+			summary.ActionRequired,
+			summary.Failure,
+			summary.Cancelled,
+			summary.Running,
+			summary.Waiting,
+			summary.Unknown,
+			summary.Stale,
+			summary.Success,
+			summary.Neutral,
+		),
+	}
+	for _, run := range runs {
+		parts = append(parts, fmt.Sprintf("run:%d:%d:%d:%s:%s:%s",
+			run.ID,
+			run.WorkflowID,
+			run.RunAttempt,
+			run.Status,
+			run.Conclusion,
+			formatTime(run.UpdatedAt),
+		))
+		for _, job := range run.Jobs {
+			parts = append(parts, fmt.Sprintf("job:%d:%d:%s:%s:%s:%s",
+				job.ID,
+				job.RunID,
+				job.Name,
+				job.Status,
+				job.Conclusion,
+				formatTime(job.CompletedAt),
+			))
+		}
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return fmt.Sprintf("v1:%x", sum)
 }
 
 func isDirtyMergeState(value string) bool {
