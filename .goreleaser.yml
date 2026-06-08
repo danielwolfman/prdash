@@ -29,15 +29,12 @@ archives:
     ids:
       - prdash
     formats:
-      - tar.gz
+      - binary
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
       {{- .Os }}_
       {{- .Arch }}
-    files:
-      - README.md
-      - LICENSE
 
 checksum:
   name_template: checksums.txt

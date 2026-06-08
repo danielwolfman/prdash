@@ -33,7 +33,7 @@ With Go:
 go install github.com/danielwolfman/prdash/cmd/prdash@latest
 ```
 
-Release archives are produced by GoReleaser for Linux and macOS on `amd64` and `arm64`. Each archive contains the `prdash` binary, `README.md`, and `LICENSE`; the release also includes a `checksums.txt` file.
+Release binaries are produced by GoReleaser for Linux and macOS on `amd64` and `arm64`. Each release also includes a `checksums.txt` file.
 
 ## Setup
 
