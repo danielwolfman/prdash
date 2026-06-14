@@ -77,15 +77,15 @@ func TestSearchAuthoredOpenPRs(t *testing.T) {
 						},
 					},
 				}
-			case strings.Contains(query, "author:dependabot"):
+			case strings.Contains(query, "author:app/agent-pr-manager"):
 				nodes = []map[string]any{
 					{
 						"number":           13,
-						"title":            "Bump dependency",
+						"title":            "Update compatibility pins",
 						"url":              "https://github.com/octo-org/prdash/pull/13",
 						"isDraft":          false,
 						"updatedAt":        "2026-06-01T15:00:00Z",
-						"headRefName":      "dependabot/go/pkg",
+						"headRefName":      "automation/update-pins",
 						"headRefOid":       "fed789",
 						"baseRefName":      "main",
 						"mergeStateStatus": "CLEAN",
@@ -98,6 +98,13 @@ func TestSearchAuthoredOpenPRs(t *testing.T) {
 						},
 					},
 				}
+			case strings.Contains(query, "author:agent-pr-manager"):
+				writeJSON(t, w, map[string]any{
+					"errors": []map[string]any{
+						{"message": "The listed users cannot be searched either because the users do not exist or you do not have permission to view the users."},
+					},
+				})
+				return
 			default:
 				t.Fatalf("unexpected search query: %s", query)
 			}
@@ -116,12 +123,12 @@ func TestSearchAuthoredOpenPRs(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-token", WithBaseURLs(server.URL, server.URL+"/graphql"))
-	prs, err := client.SearchAuthoredOpenPRs(context.Background(), 40, []string{"octo-org"}, []string{"dependabot", "OCTO-USER"})
+	prs, err := client.SearchAuthoredOpenPRs(context.Background(), 40, []string{"octo-org"}, []string{"agent-pr-manager", "OCTO-USER"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if searchRequests != 2 {
-		t.Fatalf("search requests = %d, want 2", searchRequests)
+	if searchRequests != 3 {
+		t.Fatalf("search requests = %d, want 3", searchRequests)
 	}
 	if len(prs) != 2 {
 		t.Fatalf("len(prs) = %d, want 2: %+v", len(prs), prs)

@@ -75,17 +75,22 @@ func (c *Client) SearchAuthoredOpenPRs(ctx context.Context, limit int, includeOw
 	seen := make(map[string]bool)
 	var merged []model.PullRequest
 	for _, author := range authors {
-		prs, err := c.searchOpenPRsByAuthor(ctx, author, limit, includeOwners)
-		if err != nil {
-			return nil, err
-		}
-		for _, pr := range prs {
-			key := strings.ToLower(pr.RepoFullName) + "#" + fmt.Sprint(pr.Number)
-			if seen[key] {
-				continue
+		for _, candidate := range author.Candidates {
+			prs, err := c.searchOpenPRsByAuthor(ctx, candidate.QueryAuthor, limit, includeOwners)
+			if err != nil {
+				if candidate.Optional && isUnsearchableAuthorError(err) {
+					continue
+				}
+				return nil, err
 			}
-			seen[key] = true
-			merged = append(merged, pr)
+			for _, pr := range prs {
+				key := strings.ToLower(pr.RepoFullName) + "#" + fmt.Sprint(pr.Number)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				merged = append(merged, pr)
+			}
 		}
 	}
 	sort.SliceStable(merged, func(i, j int) bool {
@@ -97,10 +102,25 @@ func (c *Client) SearchAuthoredOpenPRs(ctx context.Context, limit int, includeOw
 	return merged, nil
 }
 
-func monitoredAuthors(login string, includeAuthors []string) []string {
-	var authors []string
+type monitoredAuthor struct {
+	Candidates []authorCandidate
+}
+
+type authorCandidate struct {
+	QueryAuthor string
+	Optional    bool
+}
+
+func monitoredAuthors(login string, includeAuthors []string) []monitoredAuthor {
+	var authors []monitoredAuthor
 	seen := make(map[string]bool)
-	for _, author := range append([]string{login}, includeAuthors...) {
+	login = strings.TrimSpace(login)
+	if login != "" {
+		key := strings.ToLower(login)
+		seen[key] = true
+		authors = append(authors, monitoredAuthor{Candidates: []authorCandidate{{QueryAuthor: login}}})
+	}
+	for _, author := range includeAuthors {
 		author = strings.TrimSpace(author)
 		if author == "" {
 			continue
@@ -110,9 +130,20 @@ func monitoredAuthors(login string, includeAuthors []string) []string {
 			continue
 		}
 		seen[key] = true
-		authors = append(authors, author)
+		candidates := []authorCandidate{{QueryAuthor: author}}
+		if !strings.Contains(author, "/") && !strings.Contains(author, "[") {
+			candidates = []authorCandidate{
+				{QueryAuthor: "app/" + author, Optional: true},
+				{QueryAuthor: author, Optional: true},
+			}
+		}
+		authors = append(authors, monitoredAuthor{Candidates: candidates})
 	}
 	return authors
+}
+
+func isUnsearchableAuthorError(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "listed users cannot be searched")
 }
 
 func (c *Client) searchOpenPRsByAuthor(ctx context.Context, author string, limit int, includeOwners []string) ([]model.PullRequest, error) {
