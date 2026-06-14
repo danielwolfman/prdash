@@ -32,7 +32,7 @@ Use GraphQL search for open monitored PRs:
 is:pr is:open author:@me archived:false sort:updated-desc
 ```
 
-Configured monitored authors are searched with the same query shape and merged with authenticated-user results by latest update time.
+Configured monitored authors are searched with the same query shape and merged with authenticated-user results by latest update time. Author entries may optionally carry explicit `owner/repo` scopes; scoped authors are searched only with those `repo:` qualifiers.
 
 Include drafts and mark them visually. Exclude archived repositories by default. Apply file-based repo exclusion patterns after discovery.
 

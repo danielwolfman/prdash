@@ -63,7 +63,12 @@ func (c *Client) ViewerLogin(ctx context.Context) (string, error) {
 	return response.Viewer.Login, nil
 }
 
-func (c *Client) SearchAuthoredOpenPRs(ctx context.Context, limit int, includeOwners, includeAuthors []string) ([]model.PullRequest, error) {
+type AuthorFilter struct {
+	Author string
+	Repos  []string
+}
+
+func (c *Client) SearchAuthoredOpenPRs(ctx context.Context, limit int, includeOwners []string, includeAuthors []AuthorFilter) ([]model.PullRequest, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -76,7 +81,7 @@ func (c *Client) SearchAuthoredOpenPRs(ctx context.Context, limit int, includeOw
 	var merged []model.PullRequest
 	for _, author := range authors {
 		for _, candidate := range author.Candidates {
-			prs, err := c.searchOpenPRsByAuthor(ctx, candidate.QueryAuthor, limit, includeOwners)
+			prs, err := c.searchOpenPRsByAuthor(ctx, candidate.QueryAuthor, limit, includeOwners, author.Repos)
 			if err != nil {
 				if candidate.Optional && isUnsearchableAuthorError(err) {
 					continue
@@ -104,6 +109,7 @@ func (c *Client) SearchAuthoredOpenPRs(ctx context.Context, limit int, includeOw
 
 type monitoredAuthor struct {
 	Candidates []authorCandidate
+	Repos      []string
 }
 
 type authorCandidate struct {
@@ -111,21 +117,22 @@ type authorCandidate struct {
 	Optional    bool
 }
 
-func monitoredAuthors(login string, includeAuthors []string) []monitoredAuthor {
+func monitoredAuthors(login string, includeAuthors []AuthorFilter) []monitoredAuthor {
 	var authors []monitoredAuthor
 	seen := make(map[string]bool)
 	login = strings.TrimSpace(login)
 	if login != "" {
-		key := strings.ToLower(login)
+		key := strings.ToLower(login) + "\x00"
 		seen[key] = true
 		authors = append(authors, monitoredAuthor{Candidates: []authorCandidate{{QueryAuthor: login}}})
 	}
-	for _, author := range includeAuthors {
-		author = strings.TrimSpace(author)
+	for _, filter := range includeAuthors {
+		author := strings.TrimSpace(filter.Author)
 		if author == "" {
 			continue
 		}
-		key := strings.ToLower(author)
+		repos := normalizeSearchValues(filter.Repos)
+		key := strings.ToLower(author) + "\x00" + strings.ToLower(strings.Join(repos, "\x00"))
 		if seen[key] {
 			continue
 		}
@@ -137,7 +144,7 @@ func monitoredAuthors(login string, includeAuthors []string) []monitoredAuthor {
 				{QueryAuthor: author, Optional: true},
 			}
 		}
-		authors = append(authors, monitoredAuthor{Candidates: candidates})
+		authors = append(authors, monitoredAuthor{Candidates: candidates, Repos: repos})
 	}
 	return authors
 }
@@ -146,14 +153,45 @@ func isUnsearchableAuthorError(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "listed users cannot be searched")
 }
 
-func (c *Client) searchOpenPRsByAuthor(ctx context.Context, author string, limit int, includeOwners []string) ([]model.PullRequest, error) {
-	queryParts := []string{"is:pr", "is:open", "author:" + author, "archived:false"}
+func (c *Client) searchOpenPRsByAuthor(ctx context.Context, author string, limit int, includeOwners, includeRepos []string) ([]model.PullRequest, error) {
+	if len(includeRepos) > 0 {
+		seen := make(map[string]bool)
+		var merged []model.PullRequest
+		for _, repo := range includeRepos {
+			prs, err := c.searchOpenPRsByAuthorQuery(ctx, author, limit, []string{"repo:" + repo})
+			if err != nil {
+				return nil, err
+			}
+			for _, pr := range prs {
+				key := strings.ToLower(pr.RepoFullName) + "#" + fmt.Sprint(pr.Number)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				merged = append(merged, pr)
+			}
+		}
+		sort.SliceStable(merged, func(i, j int) bool {
+			return merged[i].UpdatedAt.After(merged[j].UpdatedAt)
+		})
+		if len(merged) > limit {
+			merged = merged[:limit]
+		}
+		return merged, nil
+	}
+	var qualifiers []string
 	for _, owner := range includeOwners {
 		owner = strings.TrimSpace(owner)
 		if owner != "" {
-			queryParts = append(queryParts, "org:"+owner)
+			qualifiers = append(qualifiers, "org:"+owner)
 		}
 	}
+	return c.searchOpenPRsByAuthorQuery(ctx, author, limit, qualifiers)
+}
+
+func (c *Client) searchOpenPRsByAuthorQuery(ctx context.Context, author string, limit int, qualifiers []string) ([]model.PullRequest, error) {
+	queryParts := []string{"is:pr", "is:open", "author:" + author, "archived:false"}
+	queryParts = append(queryParts, qualifiers...)
 	queryParts = append(queryParts, "sort:updated-desc")
 	query := strings.Join(queryParts, " ")
 
@@ -202,6 +240,24 @@ func (c *Client) searchOpenPRsByAuthor(ctx context.Context, author string, limit
 	}
 
 	return prs, nil
+}
+
+func normalizeSearchValues(values []string) []string {
+	var normalized []string
+	seen := make(map[string]bool)
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		normalized = append(normalized, value)
+	}
+	return normalized
 }
 
 type searchPullRequestsResponse struct {

@@ -36,12 +36,15 @@ func TestSearchAuthoredOpenPRs(t *testing.T) {
 		case strings.Contains(req.Query, "SearchPullRequests"):
 			searchRequests++
 			query := req.Variables["query"].(string)
-			if !strings.Contains(query, "org:octo-org") || !strings.Contains(query, "sort:updated-desc") {
+			if !strings.Contains(query, "sort:updated-desc") {
 				t.Fatalf("unexpected search query: %s", query)
 			}
 			var nodes []map[string]any
 			switch {
 			case strings.Contains(query, "author:octo-user"):
+				if !strings.Contains(query, "org:octo-org") {
+					t.Fatalf("expected owner-scoped authenticated user query: %s", query)
+				}
 				nodes = []map[string]any{
 					{
 						"number":           12,
@@ -78,6 +81,9 @@ func TestSearchAuthoredOpenPRs(t *testing.T) {
 					},
 				}
 			case strings.Contains(query, "author:app/agent-pr-manager"):
+				if !strings.Contains(query, "repo:octo-org/prdash") || strings.Contains(query, "org:octo-org") {
+					t.Fatalf("expected repo-scoped app author query: %s", query)
+				}
 				nodes = []map[string]any{
 					{
 						"number":           13,
@@ -99,6 +105,9 @@ func TestSearchAuthoredOpenPRs(t *testing.T) {
 					},
 				}
 			case strings.Contains(query, "author:agent-pr-manager"):
+				if !strings.Contains(query, "repo:octo-org/prdash") {
+					t.Fatalf("expected repo-scoped fallback author query: %s", query)
+				}
 				writeJSON(t, w, map[string]any{
 					"errors": []map[string]any{
 						{"message": "The listed users cannot be searched either because the users do not exist or you do not have permission to view the users."},
@@ -123,7 +132,10 @@ func TestSearchAuthoredOpenPRs(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-token", WithBaseURLs(server.URL, server.URL+"/graphql"))
-	prs, err := client.SearchAuthoredOpenPRs(context.Background(), 40, []string{"octo-org"}, []string{"agent-pr-manager", "OCTO-USER"})
+	prs, err := client.SearchAuthoredOpenPRs(context.Background(), 40, []string{"octo-org"}, []AuthorFilter{
+		{Author: "agent-pr-manager", Repos: []string{"octo-org/prdash"}},
+		{Author: "OCTO-USER"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

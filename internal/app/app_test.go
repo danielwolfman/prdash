@@ -94,7 +94,7 @@ func TestConfigCommandsEditIncludedOwnersAndRerun(t *testing.T) {
 	if out, err := executeTestCommand("--config", path, "config", "include-owner", "my-company"); err != nil || !strings.Contains(out, "included owner") {
 		t.Fatalf("include-owner out=%q err=%v", out, err)
 	}
-	if out, err := executeTestCommand("--config", path, "config", "include-author", "dependabot"); err != nil || !strings.Contains(out, "included author") {
+	if out, err := executeTestCommand("--config", path, "config", "include-author", "dependabot", "my-company/prdash"); err != nil || !strings.Contains(out, "included author dependabot for 1 repos") {
 		t.Fatalf("include-author out=%q err=%v", out, err)
 	}
 	if out, err := executeTestCommand("--config", path, "config", "rerun", "enable"); err != nil || !strings.Contains(out, "rerun enabled") {
@@ -114,8 +114,11 @@ func TestConfigCommandsEditIncludedOwnersAndRerun(t *testing.T) {
 	if len(cfg.Filters.IncludeOwners) != 1 || cfg.Filters.IncludeOwners[0] != "my-company" {
 		t.Fatalf("include owners = %#v", cfg.Filters.IncludeOwners)
 	}
-	if len(cfg.Filters.IncludeAuthors) != 1 || cfg.Filters.IncludeAuthors[0] != "dependabot" {
+	if len(cfg.Filters.IncludeAuthors) != 0 {
 		t.Fatalf("include authors = %#v", cfg.Filters.IncludeAuthors)
+	}
+	if len(cfg.Filters.IncludeAuthorRules) != 1 || cfg.Filters.IncludeAuthorRules[0].Author != "dependabot" || len(cfg.Filters.IncludeAuthorRules[0].Repos) != 1 || cfg.Filters.IncludeAuthorRules[0].Repos[0] != "my-company/prdash" {
+		t.Fatalf("include author rules = %#v", cfg.Filters.IncludeAuthorRules)
 	}
 	if !cfg.Actions.AllowRerun {
 		t.Fatalf("expected rerun enabled")

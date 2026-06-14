@@ -129,6 +129,26 @@ func TestAddAndRemoveIncludedAuthor(t *testing.T) {
 	if RemoveIncludedAuthor(&cfg, "dependabot") {
 		t.Fatalf("second remove should not change config")
 	}
+
+	if !AddIncludedAuthor(&cfg, "dependabot", "octo-org/prdash", "octo-org/prdash", "octo-org/other") {
+		t.Fatalf("expected scoped add to change config")
+	}
+	if len(cfg.Filters.IncludeAuthors) != 0 {
+		t.Fatalf("scoped include should remove global author include: %#v", cfg.Filters.IncludeAuthors)
+	}
+	if len(cfg.Filters.IncludeAuthorRules) != 1 {
+		t.Fatalf("include author rules = %#v", cfg.Filters.IncludeAuthorRules)
+	}
+	rule := cfg.Filters.IncludeAuthorRules[0]
+	if rule.Author != "dependabot" || len(rule.Repos) != 2 || rule.Repos[0] != "octo-org/prdash" || rule.Repos[1] != "octo-org/other" {
+		t.Fatalf("unexpected scoped author rule: %#v", rule)
+	}
+	if !RemoveIncludedAuthor(&cfg, "dependabot") {
+		t.Fatalf("expected scoped remove to change config")
+	}
+	if len(cfg.Filters.IncludeAuthorRules) != 0 {
+		t.Fatalf("expected scoped rules removed: %#v", cfg.Filters.IncludeAuthorRules)
+	}
 }
 
 func TestSaveCreatesParentDirectory(t *testing.T) {

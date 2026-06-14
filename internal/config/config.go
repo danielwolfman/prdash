@@ -26,11 +26,17 @@ type GitHubConfig struct {
 }
 
 type FiltersConfig struct {
-	IncludeOwners   []string `toml:"include_owners"`
-	IncludeAuthors  []string `toml:"include_authors"`
-	ExcludeRepos    []string `toml:"exclude_repos"`
-	IncludeDrafts   bool     `toml:"include_drafts"`
-	IncludeArchived bool     `toml:"include_archived"`
+	IncludeOwners      []string              `toml:"include_owners"`
+	IncludeAuthors     []string              `toml:"include_authors"`
+	IncludeAuthorRules []IncludeAuthorConfig `toml:"include_author"`
+	ExcludeRepos       []string              `toml:"exclude_repos"`
+	IncludeDrafts      bool                  `toml:"include_drafts"`
+	IncludeArchived    bool                  `toml:"include_archived"`
+}
+
+type IncludeAuthorConfig struct {
+	Author string   `toml:"author"`
+	Repos  []string `toml:"repos,omitempty"`
 }
 
 type LimitsConfig struct {
@@ -84,11 +90,12 @@ func Default() Config {
 			AuthSource: "gh",
 		},
 		Filters: FiltersConfig{
-			IncludeOwners:   []string{},
-			IncludeAuthors:  []string{},
-			ExcludeRepos:    []string{},
-			IncludeDrafts:   true,
-			IncludeArchived: false,
+			IncludeOwners:      []string{},
+			IncludeAuthors:     []string{},
+			IncludeAuthorRules: []IncludeAuthorConfig{},
+			ExcludeRepos:       []string{},
+			IncludeDrafts:      true,
+			IncludeArchived:    false,
 		},
 		Limits: LimitsConfig{
 			MaxVisiblePRs:            40,
@@ -239,10 +246,22 @@ func RemoveIncludedOwner(cfg *Config, owner string) bool {
 	return removed
 }
 
-func AddIncludedAuthor(cfg *Config, author string) bool {
+func AddIncludedAuthor(cfg *Config, author string, repos ...string) bool {
 	author = strings.TrimSpace(author)
 	if author == "" {
 		return false
+	}
+	if len(repos) > 0 {
+		normalizedRepos := normalizeList(repos)
+		if len(normalizedRepos) == 0 {
+			return false
+		}
+		RemoveIncludedAuthor(cfg, author)
+		cfg.Filters.IncludeAuthorRules = append(cfg.Filters.IncludeAuthorRules, IncludeAuthorConfig{
+			Author: author,
+			Repos:  normalizedRepos,
+		})
+		return true
 	}
 	for _, existing := range cfg.Filters.IncludeAuthors {
 		if strings.EqualFold(strings.TrimSpace(existing), author) {
@@ -250,6 +269,7 @@ func AddIncludedAuthor(cfg *Config, author string) bool {
 		}
 	}
 	cfg.Filters.IncludeAuthors = append(cfg.Filters.IncludeAuthors, author)
+	cfg.Filters.IncludeAuthorRules = removeIncludedAuthorRules(cfg.Filters.IncludeAuthorRules, author)
 	return true
 }
 
@@ -268,7 +288,38 @@ func RemoveIncludedAuthor(cfg *Config, author string) bool {
 		next = append(next, existing)
 	}
 	cfg.Filters.IncludeAuthors = next
-	return removed
+	before := len(cfg.Filters.IncludeAuthorRules)
+	cfg.Filters.IncludeAuthorRules = removeIncludedAuthorRules(cfg.Filters.IncludeAuthorRules, author)
+	return removed || len(cfg.Filters.IncludeAuthorRules) != before
+}
+
+func normalizeList(values []string) []string {
+	var normalized []string
+	seen := make(map[string]bool)
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		normalized = append(normalized, value)
+	}
+	return normalized
+}
+
+func removeIncludedAuthorRules(rules []IncludeAuthorConfig, author string) []IncludeAuthorConfig {
+	next := rules[:0]
+	for _, rule := range rules {
+		if strings.EqualFold(strings.TrimSpace(rule.Author), author) {
+			continue
+		}
+		next = append(next, rule)
+	}
+	return next
 }
 
 func Marshal(cfg Config) ([]byte, error) {

@@ -31,6 +31,7 @@ prdash config list
 prdash config include-owner my-company
 prdash config remove-owner my-company
 prdash config include-author dependabot
+prdash config include-author dependabot my-company/service my-company/worker
 prdash config remove-author dependabot
 prdash config exclude owner/repo
 prdash config include owner/repo
@@ -44,6 +45,8 @@ prdash version
 `prdash init` creates the default config without overwriting an existing file unless `--force` is passed. Rerun actions require the GitHub CLI token to have the `workflow` scope; `prdash doctor` prints the exact `gh auth refresh` command when scopes are missing.
 
 Debug logs are enabled by default and write to the user cache directory unless `[logging].path` is set. Logs include startup/config state, loader refresh cycles, GitHub request method/status/duration, per-PR job fetch timing, rerun actions, and hot-refresh triggers. Tokens are redacted and PR titles are omitted by default.
+
+Configured authors are searched across included owners by default. Pass one or more `owner/repo` arguments to `prdash config include-author` to restrict that author to specific repositories.
 
 ## PR Event Hooks
 
