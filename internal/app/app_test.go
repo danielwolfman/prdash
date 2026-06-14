@@ -94,6 +94,9 @@ func TestConfigCommandsEditIncludedOwnersAndRerun(t *testing.T) {
 	if out, err := executeTestCommand("--config", path, "config", "include-owner", "my-company"); err != nil || !strings.Contains(out, "included owner") {
 		t.Fatalf("include-owner out=%q err=%v", out, err)
 	}
+	if out, err := executeTestCommand("--config", path, "config", "include-author", "dependabot"); err != nil || !strings.Contains(out, "included author") {
+		t.Fatalf("include-author out=%q err=%v", out, err)
+	}
 	if out, err := executeTestCommand("--config", path, "config", "rerun", "enable"); err != nil || !strings.Contains(out, "rerun enabled") {
 		t.Fatalf("rerun enable out=%q err=%v", out, err)
 	}
@@ -101,7 +104,7 @@ func TestConfigCommandsEditIncludedOwnersAndRerun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "my-company") || !strings.Contains(out, "allow_rerun: true") || !strings.Contains(out, "hooks_enabled: false") {
+	if !strings.Contains(out, "my-company") || !strings.Contains(out, "dependabot") || !strings.Contains(out, "allow_rerun: true") || !strings.Contains(out, "hooks_enabled: false") {
 		t.Fatalf("unexpected config list: %q", out)
 	}
 	cfg, err := config.Load(path)
@@ -110,6 +113,9 @@ func TestConfigCommandsEditIncludedOwnersAndRerun(t *testing.T) {
 	}
 	if len(cfg.Filters.IncludeOwners) != 1 || cfg.Filters.IncludeOwners[0] != "my-company" {
 		t.Fatalf("include owners = %#v", cfg.Filters.IncludeOwners)
+	}
+	if len(cfg.Filters.IncludeAuthors) != 1 || cfg.Filters.IncludeAuthors[0] != "dependabot" {
+		t.Fatalf("include authors = %#v", cfg.Filters.IncludeAuthors)
 	}
 	if !cfg.Actions.AllowRerun {
 		t.Fatalf("expected rerun enabled")

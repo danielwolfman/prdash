@@ -13,6 +13,7 @@ import (
 )
 
 func TestSearchAuthoredOpenPRs(t *testing.T) {
+	searchRequests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/graphql" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -33,48 +34,78 @@ func TestSearchAuthoredOpenPRs(t *testing.T) {
 				},
 			})
 		case strings.Contains(req.Query, "SearchPullRequests"):
-			if query := req.Variables["query"].(string); !strings.Contains(query, "author:octo-user") || !strings.Contains(query, "org:octo-org") || !strings.Contains(query, "sort:updated-desc") {
+			searchRequests++
+			query := req.Variables["query"].(string)
+			if !strings.Contains(query, "org:octo-org") || !strings.Contains(query, "sort:updated-desc") {
+				t.Fatalf("unexpected search query: %s", query)
+			}
+			var nodes []map[string]any
+			switch {
+			case strings.Contains(query, "author:octo-user"):
+				nodes = []map[string]any{
+					{
+						"number":           12,
+						"title":            "Add dashboard",
+						"url":              "https://github.com/octo-org/prdash/pull/12",
+						"isDraft":          true,
+						"updatedAt":        "2026-06-01T14:00:00Z",
+						"headRefName":      "feature/dashboard",
+						"headRefOid":       "abc123",
+						"baseRefName":      "main",
+						"mergeStateStatus": "BLOCKED",
+						"reviewDecision":   "REVIEW_REQUIRED",
+						"repository": map[string]any{
+							"name":          "prdash",
+							"nameWithOwner": "octo-org/prdash",
+							"isArchived":    false,
+							"owner":         map[string]any{"login": "octo-org"},
+						},
+					},
+					{
+						"number":      99,
+						"title":       "Archived noise",
+						"url":         "https://github.com/octo-org/old/pull/99",
+						"updatedAt":   "2026-06-01T13:00:00Z",
+						"headRefName": "old",
+						"headRefOid":  "def456",
+						"baseRefName": "main",
+						"repository": map[string]any{
+							"name":          "old",
+							"nameWithOwner": "octo-org/old",
+							"isArchived":    true,
+							"owner":         map[string]any{"login": "octo-org"},
+						},
+					},
+				}
+			case strings.Contains(query, "author:dependabot"):
+				nodes = []map[string]any{
+					{
+						"number":           13,
+						"title":            "Bump dependency",
+						"url":              "https://github.com/octo-org/prdash/pull/13",
+						"isDraft":          false,
+						"updatedAt":        "2026-06-01T15:00:00Z",
+						"headRefName":      "dependabot/go/pkg",
+						"headRefOid":       "fed789",
+						"baseRefName":      "main",
+						"mergeStateStatus": "CLEAN",
+						"reviewDecision":   "",
+						"repository": map[string]any{
+							"name":          "prdash",
+							"nameWithOwner": "octo-org/prdash",
+							"isArchived":    false,
+							"owner":         map[string]any{"login": "octo-org"},
+						},
+					},
+				}
+			default:
 				t.Fatalf("unexpected search query: %s", query)
 			}
 			writeJSON(t, w, map[string]any{
 				"data": map[string]any{
 					"search": map[string]any{
 						"pageInfo": map[string]any{"hasNextPage": false, "endCursor": nil},
-						"nodes": []map[string]any{
-							{
-								"number":           12,
-								"title":            "Add dashboard",
-								"url":              "https://github.com/octo-org/prdash/pull/12",
-								"isDraft":          true,
-								"updatedAt":        "2026-06-01T14:00:00Z",
-								"headRefName":      "feature/dashboard",
-								"headRefOid":       "abc123",
-								"baseRefName":      "main",
-								"mergeStateStatus": "BLOCKED",
-								"reviewDecision":   "REVIEW_REQUIRED",
-								"repository": map[string]any{
-									"name":          "prdash",
-									"nameWithOwner": "octo-org/prdash",
-									"isArchived":    false,
-									"owner":         map[string]any{"login": "octo-org"},
-								},
-							},
-							{
-								"number":      99,
-								"title":       "Archived noise",
-								"url":         "https://github.com/octo-org/old/pull/99",
-								"updatedAt":   "2026-06-01T13:00:00Z",
-								"headRefName": "old",
-								"headRefOid":  "def456",
-								"baseRefName": "main",
-								"repository": map[string]any{
-									"name":          "old",
-									"nameWithOwner": "octo-org/old",
-									"isArchived":    true,
-									"owner":         map[string]any{"login": "octo-org"},
-								},
-							},
-						},
+						"nodes":    nodes,
 					},
 				},
 			})
@@ -85,14 +116,20 @@ func TestSearchAuthoredOpenPRs(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-token", WithBaseURLs(server.URL, server.URL+"/graphql"))
-	prs, err := client.SearchAuthoredOpenPRs(context.Background(), 40, []string{"octo-org"})
+	prs, err := client.SearchAuthoredOpenPRs(context.Background(), 40, []string{"octo-org"}, []string{"dependabot", "OCTO-USER"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(prs) != 1 {
-		t.Fatalf("len(prs) = %d, want 1: %+v", len(prs), prs)
+	if searchRequests != 2 {
+		t.Fatalf("search requests = %d, want 2", searchRequests)
 	}
-	pr := prs[0]
+	if len(prs) != 2 {
+		t.Fatalf("len(prs) = %d, want 2: %+v", len(prs), prs)
+	}
+	if prs[0].Number != 13 || prs[0].HeadSHA != "fed789" {
+		t.Fatalf("expected newest monitored-author PR first: %+v", prs)
+	}
+	pr := prs[1]
 	if pr.Owner != "octo-org" || pr.Repo != "prdash" || pr.Number != 12 || pr.HeadSHA != "abc123" {
 		t.Fatalf("unexpected pr: %+v", pr)
 	}

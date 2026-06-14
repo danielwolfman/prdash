@@ -111,6 +111,26 @@ func TestAddAndRemoveIncludedOwner(t *testing.T) {
 	}
 }
 
+func TestAddAndRemoveIncludedAuthor(t *testing.T) {
+	cfg := Default()
+
+	if !AddIncludedAuthor(&cfg, "dependabot") {
+		t.Fatalf("expected first add to change config")
+	}
+	if AddIncludedAuthor(&cfg, "DEPENDABOT") {
+		t.Fatalf("duplicate add should not change config")
+	}
+	if len(cfg.Filters.IncludeAuthors) != 1 {
+		t.Fatalf("include authors = %#v", cfg.Filters.IncludeAuthors)
+	}
+	if !RemoveIncludedAuthor(&cfg, "dependabot") {
+		t.Fatalf("expected remove to change config")
+	}
+	if RemoveIncludedAuthor(&cfg, "dependabot") {
+		t.Fatalf("second remove should not change config")
+	}
+}
+
 func TestSaveCreatesParentDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.toml")
 	cfg := Default()

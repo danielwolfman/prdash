@@ -1,6 +1,6 @@
 # prdash
 
-`prdash` is a local terminal dashboard for GitHub pull requests authored by the authenticated user. It shows open authored PRs, current-head GitHub Actions jobs, adaptive refresh state, event hooks, and confirmed rerun actions.
+`prdash` is a local terminal dashboard for monitored GitHub pull requests. It shows open PRs authored by the authenticated user plus any configured authors, current-head GitHub Actions jobs, adaptive refresh state, event hooks, and confirmed rerun actions.
 
 ![prdash preview](docs/assets/prdash-preview.png)
 
@@ -30,6 +30,8 @@ prdash auth status
 prdash config list
 prdash config include-owner my-company
 prdash config remove-owner my-company
+prdash config include-author dependabot
+prdash config remove-author dependabot
 prdash config exclude owner/repo
 prdash config include owner/repo
 prdash config rerun enable

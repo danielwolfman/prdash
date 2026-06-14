@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/danielwolfman/prdash/internal/model"
@@ -62,7 +63,7 @@ func (c *Client) ViewerLogin(ctx context.Context) (string, error) {
 	return response.Viewer.Login, nil
 }
 
-func (c *Client) SearchAuthoredOpenPRs(ctx context.Context, limit int, includeOwners []string) ([]model.PullRequest, error) {
+func (c *Client) SearchAuthoredOpenPRs(ctx context.Context, limit int, includeOwners, includeAuthors []string) ([]model.PullRequest, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -70,7 +71,52 @@ func (c *Client) SearchAuthoredOpenPRs(ctx context.Context, limit int, includeOw
 	if err != nil {
 		return nil, err
 	}
-	queryParts := []string{"is:pr", "is:open", "author:" + login, "archived:false"}
+	authors := monitoredAuthors(login, includeAuthors)
+	seen := make(map[string]bool)
+	var merged []model.PullRequest
+	for _, author := range authors {
+		prs, err := c.searchOpenPRsByAuthor(ctx, author, limit, includeOwners)
+		if err != nil {
+			return nil, err
+		}
+		for _, pr := range prs {
+			key := strings.ToLower(pr.RepoFullName) + "#" + fmt.Sprint(pr.Number)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			merged = append(merged, pr)
+		}
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		return merged[i].UpdatedAt.After(merged[j].UpdatedAt)
+	})
+	if len(merged) > limit {
+		merged = merged[:limit]
+	}
+	return merged, nil
+}
+
+func monitoredAuthors(login string, includeAuthors []string) []string {
+	var authors []string
+	seen := make(map[string]bool)
+	for _, author := range append([]string{login}, includeAuthors...) {
+		author = strings.TrimSpace(author)
+		if author == "" {
+			continue
+		}
+		key := strings.ToLower(author)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		authors = append(authors, author)
+	}
+	return authors
+}
+
+func (c *Client) searchOpenPRsByAuthor(ctx context.Context, author string, limit int, includeOwners []string) ([]model.PullRequest, error) {
+	queryParts := []string{"is:pr", "is:open", "author:" + author, "archived:false"}
 	for _, owner := range includeOwners {
 		owner = strings.TrimSpace(owner)
 		if owner != "" {

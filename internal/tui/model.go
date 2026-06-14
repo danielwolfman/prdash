@@ -207,7 +207,7 @@ func (m Model) View() string {
 		} else if m.loadError != "" {
 			rows = []string{m.styles.error.Render("load failed: " + m.loadError)}
 		} else {
-			rows = []string{m.styles.muted.Render("No open authored PRs found.")}
+			rows = []string{m.styles.muted.Render("No open monitored PRs found.")}
 		}
 	}
 	for _, line := range rows {

@@ -2,7 +2,7 @@
 
 ## Goals
 
-`prdash` is a general-purpose open-source local terminal dashboard for GitHub PRs authored by the authenticated user. It should be useful for dogfooding first, then hardened through public early releases.
+`prdash` is a general-purpose open-source local terminal dashboard for GitHub PRs authored by the authenticated user plus configured monitored authors. It should be useful for dogfooding first, then hardened through public early releases.
 
 ## Non-Goals
 
@@ -26,11 +26,13 @@ Required scopes:
 
 ## PR Discovery
 
-Use GraphQL search for open authored PRs:
+Use GraphQL search for open monitored PRs:
 
 ```text
 is:pr is:open author:@me archived:false sort:updated-desc
 ```
+
+Configured monitored authors are searched with the same query shape and merged with authenticated-user results by latest update time.
 
 Include drafts and mark them visually. Exclude archived repositories by default. Apply file-based repo exclusion patterns after discovery.
 

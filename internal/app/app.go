@@ -35,7 +35,7 @@ func New() *cobra.Command {
 
 	root := &cobra.Command{
 		Use:   "prdash",
-		Short: "A dense terminal dashboard for authored GitHub PRs",
+		Short: "A dense terminal dashboard for monitored GitHub PRs",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger, err := loggerForConfig(configPath)
 			if err != nil {
@@ -257,6 +257,7 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 			"rate_budget_pct":  cfg.Limits.TargetRateBudgetPercent,
 			"log_path":         logger.Path(),
 			"include_owners":   len(cfg.Filters.IncludeOwners),
+			"include_authors":  len(cfg.Filters.IncludeAuthors),
 			"exclude_patterns": len(cfg.Filters.ExcludeRepos),
 			"hooks_enabled":    cfg.Hooks.Enabled,
 			"hook_commands":    len(cfg.Hooks.Commands),
@@ -293,9 +294,9 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 			searchLimit = 100
 		}
 		for {
-			events <- tui.LoadEvent{User: status.Account, Message: fmt.Sprintf("discovering up to %d authored PRs", cfg.Limits.MaxVisiblePRs), SnapshotAt: time.Now()}
+			events <- tui.LoadEvent{User: status.Account, Message: fmt.Sprintf("discovering up to %d monitored PRs", cfg.Limits.MaxVisiblePRs), SnapshotAt: time.Now()}
 			cycleStart := time.Now()
-			prs, err := client.SearchAuthoredOpenPRs(ctx, searchLimit, cfg.Filters.IncludeOwners)
+			prs, err := client.SearchAuthoredOpenPRs(ctx, searchLimit, cfg.Filters.IncludeOwners, cfg.Filters.IncludeAuthors)
 			if err != nil {
 				logger.Error("loader_search_error", map[string]any{"error": err.Error()})
 				events <- tui.LoadEvent{Error: err.Error(), Done: true}
@@ -562,6 +563,14 @@ func configCommand(configPath *string) *cobra.Command {
 					fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", owner)
 				}
 			}
+			if len(cfg.Filters.IncludeAuthors) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "include_authors: authenticated user only")
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "include_authors:")
+				for _, author := range cfg.Filters.IncludeAuthors {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", author)
+				}
+			}
 			if len(cfg.Filters.ExcludeRepos) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "exclude_repos: none")
 			} else {
@@ -624,6 +633,58 @@ func configCommand(configPath *string) *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "removed owner %s\n", owner)
 			} else {
 				fmt.Fprintf(cmd.OutOrStdout(), "owner %s was not included\n", owner)
+			}
+			return nil
+		},
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "include-author author",
+		Short: "Also include open PRs authored by this GitHub user or app",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, cfg, err := loadConfigForEdit(*configPath)
+			if err != nil {
+				return err
+			}
+			author := strings.TrimSpace(args[0])
+			if author == "" {
+				return fmt.Errorf("author must not be empty")
+			}
+			added := config.AddIncludedAuthor(&cfg, author)
+			if err := config.Save(path, cfg); err != nil {
+				return err
+			}
+			if added {
+				fmt.Fprintf(cmd.OutOrStdout(), "included author %s\n", author)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "author %s already included\n", author)
+			}
+			return nil
+		},
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "remove-author author",
+		Short: "Remove an author from the include-author filter",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, cfg, err := loadConfigForEdit(*configPath)
+			if err != nil {
+				return err
+			}
+			author := strings.TrimSpace(args[0])
+			if author == "" {
+				return fmt.Errorf("author must not be empty")
+			}
+			removed := config.RemoveIncludedAuthor(&cfg, author)
+			if err := config.Save(path, cfg); err != nil {
+				return err
+			}
+			if removed {
+				fmt.Fprintf(cmd.OutOrStdout(), "removed author %s\n", author)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "author %s was not included\n", author)
 			}
 			return nil
 		},

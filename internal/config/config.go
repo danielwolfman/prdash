@@ -27,6 +27,7 @@ type GitHubConfig struct {
 
 type FiltersConfig struct {
 	IncludeOwners   []string `toml:"include_owners"`
+	IncludeAuthors  []string `toml:"include_authors"`
 	ExcludeRepos    []string `toml:"exclude_repos"`
 	IncludeDrafts   bool     `toml:"include_drafts"`
 	IncludeArchived bool     `toml:"include_archived"`
@@ -84,6 +85,7 @@ func Default() Config {
 		},
 		Filters: FiltersConfig{
 			IncludeOwners:   []string{},
+			IncludeAuthors:  []string{},
 			ExcludeRepos:    []string{},
 			IncludeDrafts:   true,
 			IncludeArchived: false,
@@ -234,6 +236,38 @@ func RemoveIncludedOwner(cfg *Config, owner string) bool {
 		next = append(next, existing)
 	}
 	cfg.Filters.IncludeOwners = next
+	return removed
+}
+
+func AddIncludedAuthor(cfg *Config, author string) bool {
+	author = strings.TrimSpace(author)
+	if author == "" {
+		return false
+	}
+	for _, existing := range cfg.Filters.IncludeAuthors {
+		if strings.EqualFold(strings.TrimSpace(existing), author) {
+			return false
+		}
+	}
+	cfg.Filters.IncludeAuthors = append(cfg.Filters.IncludeAuthors, author)
+	return true
+}
+
+func RemoveIncludedAuthor(cfg *Config, author string) bool {
+	author = strings.TrimSpace(author)
+	if author == "" {
+		return false
+	}
+	next := cfg.Filters.IncludeAuthors[:0]
+	removed := false
+	for _, existing := range cfg.Filters.IncludeAuthors {
+		if strings.EqualFold(strings.TrimSpace(existing), author) {
+			removed = true
+			continue
+		}
+		next = append(next, existing)
+	}
+	cfg.Filters.IncludeAuthors = next
 	return removed
 }
 
