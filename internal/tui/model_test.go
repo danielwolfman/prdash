@@ -7,7 +7,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/danielwolfman/prdash/internal/model"
+	"github.com/muesli/termenv"
 )
 
 func TestViewRendersDenseDashboard(t *testing.T) {
@@ -117,6 +119,40 @@ func TestRefreshReplaceRowsRemovesMissingPRs(t *testing.T) {
 	}
 	if m.dashboard.Rows[0].FetchError == "" {
 		t.Fatalf("expected cached row state to be preserved during refresh")
+	}
+}
+
+func TestLoadErrorKeepsListeningAndRendersFooterError(t *testing.T) {
+	previousProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previousProfile) })
+
+	m := New(Dashboard{
+		Animations: false,
+		Loader:     func(ctx context.Context, refresh <-chan struct{}, events chan<- LoadEvent) {},
+	})
+	m.width = 160
+	m.height = 6
+
+	updated, cmd := m.Update(LoadEvent{Error: "github api 401 Unauthorized", Done: true})
+	m = updated.(Model)
+
+	if cmd == nil {
+		t.Fatalf("load error should keep waiting for retry events")
+	}
+	if !strings.Contains(stripANSI(m.View()), "load error: github api 401 Unauthorized") {
+		t.Fatalf("load error footer missing:\n%s", stripANSI(m.View()))
+	}
+	if !strings.Contains(m.View(), "\x1b[38;5;196mload error: github api 401 Unauthorized") {
+		t.Fatalf("load error footer should render with error color:\n%q", m.View())
+	}
+
+	m.applyLoadEvent(LoadEvent{Message: "discovering up to 10 monitored PRs", SnapshotAt: time.Now()})
+	if m.loadError != "" {
+		t.Fatalf("loader progress should clear load error, got %q", m.loadError)
+	}
+	if strings.Contains(stripANSI(m.View()), "load error:") {
+		t.Fatalf("load error footer should clear after loader progress:\n%s", stripANSI(m.View()))
 	}
 }
 

@@ -294,18 +294,29 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 			searchLimit = 100
 		}
 		includeAuthors := authorFiltersFromConfig(cfg)
+		refreshInterval := calculateRefreshInterval(cfg, cfg.Limits.MaxVisiblePRs)
 		for {
 			events <- tui.LoadEvent{User: status.Account, Message: fmt.Sprintf("discovering up to %d monitored PRs", cfg.Limits.MaxVisiblePRs), SnapshotAt: time.Now()}
 			cycleStart := time.Now()
 			prs, err := client.SearchAuthoredOpenPRs(ctx, searchLimit, cfg.Filters.IncludeOwners, includeAuthors)
 			if err != nil {
 				logger.Error("loader_search_error", map[string]any{"error": err.Error()})
-				events <- tui.LoadEvent{Error: err.Error(), Done: true}
-				return
+				events <- tui.LoadEvent{Error: err.Error(), Done: true, RefreshInterval: refreshInterval, SnapshotAt: time.Now()}
+				refreshed, waitErr := waitForRefresh(ctx, refresh, refreshInterval)
+				if waitErr != nil {
+					logger.Info("loader_stop", map[string]any{"error": waitErr.Error()})
+					return
+				}
+				token, client = refreshGitHubToken(ctx, cfg.GitHub.Host, token, logger)
+				if refreshed {
+					logger.Info("loader_hot_refresh", nil)
+					events <- tui.LoadEvent{Message: "hot refresh after load error", SnapshotAt: time.Now(), RefreshInterval: refreshInterval}
+				}
+				continue
 			}
 
 			rows, excluded := prepareRows(prs, cfg)
-			refreshInterval := calculateRefreshInterval(cfg, len(rows))
+			refreshInterval = calculateRefreshInterval(cfg, len(rows))
 			logger.Info("loader_discovered_prs", map[string]any{
 				"discovered":         len(prs),
 				"visible":            len(rows),
@@ -378,6 +389,18 @@ func prepareRows(prs []model.PullRequest, cfg config.Config) ([]tui.Row, int) {
 		rows = append(rows, tui.Row{PR: pr, Loading: true})
 	}
 	return rows, excluded
+}
+
+func refreshGitHubToken(ctx context.Context, host, currentToken string, logger *logpkg.Logger) (string, *ghapi.Client) {
+	token, err := auth.Token(ctx, host)
+	if err != nil {
+		logger.Warn("loader_token_refresh_error", map[string]any{"error": err.Error()})
+		return currentToken, ghapi.NewClient(currentToken, ghapi.WithLogger(logger))
+	}
+	if token != currentToken {
+		logger.Info("loader_token_refreshed", nil)
+	}
+	return token, ghapi.NewClient(token, ghapi.WithLogger(logger))
 }
 
 func streamJobFetches(ctx context.Context, client *ghapi.Client, rows []tui.Row, concurrency, totalDiscovered, excluded int, events chan<- tui.LoadEvent, logger *logpkg.Logger, hookDispatcher *hooks.Dispatcher) {

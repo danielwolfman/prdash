@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/danielwolfman/prdash/internal/model"
 )
 
@@ -165,7 +166,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case LoadEvent:
 		m.applyLoadEvent(msg)
-		if !msg.Closed && msg.Error == "" {
+		if !msg.Closed {
 			return m, m.waitForLoadEvent()
 		}
 	case actionResultMsg:
@@ -255,11 +256,10 @@ func (m Model) footer() string {
 	if m.symbols.ascii {
 		mode = "ascii"
 	}
-	status := m.loadText
+	status := m.footerStatus()
+	renderedStatus := status
 	if m.loadError != "" {
-		status = "load error: " + m.loadError
-	} else if m.dashboard.RefreshInterval > 0 && !m.loading {
-		status = fmt.Sprintf("%s · refresh %s", status, shortDuration(m.dashboard.RefreshInterval))
+		renderedStatus = m.styles.error.Render(status)
 	}
 	action := "r disabled"
 	if m.dashboard.ActionsEnabled {
@@ -268,8 +268,24 @@ func (m Model) footer() string {
 	if m.actionText != "" {
 		action += " · " + m.actionText
 	}
-	text := fmt.Sprintf(" ↑/↓ j/k move · enter expand · o open · %s · q quit · symbols %s · %s ", action, mode, status)
+	prefix := fmt.Sprintf(" ↑/↓ j/k move · enter expand · o open · %s · q quit · symbols %s · ", action, mode)
+	text := prefix + renderedStatus + " "
+	if m.loadError != "" {
+		maxStatusWidth := max(1, m.width-lipgloss.Width(prefix)-1)
+		text = prefix + m.styles.error.Render(fitPlain(status, maxStatusWidth)) + " "
+		return m.styles.footer.Width(max(1, m.width)).Render(fitANSI(text, max(1, m.width)))
+	}
 	return m.styles.footer.Width(max(1, m.width)).Render(fitPlain(text, max(1, m.width)))
+}
+
+func (m Model) footerStatus() string {
+	if m.loadError != "" {
+		return "load error: " + m.loadError
+	}
+	if m.dashboard.RefreshInterval > 0 && !m.loading {
+		return fmt.Sprintf("%s · refresh %s", m.loadText, shortDuration(m.dashboard.RefreshInterval))
+	}
+	return m.loadText
 }
 
 func (m Model) confirmLine() string {
@@ -693,6 +709,9 @@ func (m Model) waitForLoadEvent() tea.Cmd {
 }
 
 func (m *Model) applyLoadEvent(event LoadEvent) {
+	if !event.Closed && event.Error == "" && (event.Message != "" || event.Row != nil || event.ReplaceRows) {
+		m.loadError = ""
+	}
 	if event.User != "" {
 		m.dashboard.User = event.User
 	}
