@@ -326,6 +326,7 @@ func TestDispatcherFiresReadyForReviewOncePerHead(t *testing.T) {
 	ready := pr
 	ready.IsDraft = false
 	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{ready}, nil)
+	calls.assertNoMore(t)
 	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{ready}, nil)
 
 	gotCalls := calls.collect(t, 1)
@@ -335,6 +336,23 @@ func TestDispatcherFiresReadyForReviewOncePerHead(t *testing.T) {
 	if gotCalls[0].PR.IsDraft {
 		t.Fatalf("ready payload still marked draft: %#v", gotCalls[0].PR)
 	}
+	calls.assertNoMore(t)
+}
+
+func TestDispatcherDoesNotFireReadyForReviewForTransientReadyObservation(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	pr.State = "OPEN"
+	pr.IsDraft = true
+	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{pr}, nil)
+	calls.assertNoMore(t)
+
+	ready := pr
+	ready.IsDraft = false
+	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{ready}, nil)
+	calls.assertNoMore(t)
+
+	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{pr}, nil)
 	calls.assertNoMore(t)
 }
 

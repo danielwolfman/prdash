@@ -170,6 +170,7 @@ type lifecycleState struct {
 	Open                  bool   `json:"open,omitempty"`
 	IsDraft               bool   `json:"is_draft,omitempty"`
 	HeadSHA               string `json:"head_sha,omitempty"`
+	ReadyCandidateHeadSHA string `json:"ready_candidate_head_sha,omitempty"`
 	ReadyForReviewHeadSHA string `json:"ready_for_review_head_sha,omitempty"`
 	ClosedEventFired      bool   `json:"closed_event_fired,omitempty"`
 	MergedEventFired      bool   `json:"merged_event_fired,omitempty"`
@@ -393,11 +394,21 @@ func (d *Dispatcher) ObserveLifecycles(ctx context.Context, prs []model.PullRequ
 			d.state.PRLifecycles[key] = current
 			continue
 		}
-		if previous.Open && previous.IsDraft && !pr.IsDraft && previous.ReadyForReviewHeadSHA != pr.HeadSHA {
-			current.ReadyForReviewHeadSHA = pr.HeadSHA
-			payloads = append(payloads, d.lifecyclePayload(EventPRReadyForReview, now, pr))
-		} else {
-			current.ReadyForReviewHeadSHA = previous.ReadyForReviewHeadSHA
+		current.ReadyForReviewHeadSHA = previous.ReadyForReviewHeadSHA
+		current.ReadyCandidateHeadSHA = previous.ReadyCandidateHeadSHA
+		if pr.IsDraft {
+			current.ReadyCandidateHeadSHA = ""
+		} else if previous.ReadyForReviewHeadSHA != pr.HeadSHA {
+			switch {
+			case previous.ReadyCandidateHeadSHA == pr.HeadSHA:
+				current.ReadyForReviewHeadSHA = pr.HeadSHA
+				current.ReadyCandidateHeadSHA = ""
+				payloads = append(payloads, d.lifecyclePayload(EventPRReadyForReview, now, pr))
+			case previous.Open && previous.IsDraft:
+				current.ReadyCandidateHeadSHA = pr.HeadSHA
+			default:
+				current.ReadyCandidateHeadSHA = ""
+			}
 		}
 		current.ClosedEventFired = previous.ClosedEventFired
 		current.MergedEventFired = previous.MergedEventFired
@@ -458,6 +469,7 @@ func (d *Dispatcher) ObserveLifecycles(ctx context.Context, prs []model.PullRequ
 			shouldDispatch = true
 		}
 		updated := lifecycleStateFromPR(live, now)
+		updated.ReadyCandidateHeadSHA = current.ReadyCandidateHeadSHA
 		updated.ReadyForReviewHeadSHA = current.ReadyForReviewHeadSHA
 		updated.ClosedEventFired = current.ClosedEventFired
 		updated.MergedEventFired = current.MergedEventFired
