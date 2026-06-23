@@ -315,6 +315,9 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 				continue
 			}
 
+			hookDispatcher.ObserveLifecycles(ctx, lifecyclePRs(prs, cfg), func(ctx context.Context, pr model.PullRequest) (model.PullRequest, error) {
+				return client.PullRequest(ctx, pr.RepoFullName, pr.Number)
+			})
 			rows, excluded := prepareRows(prs, cfg)
 			refreshInterval = calculateRefreshInterval(cfg, len(rows))
 			logger.Info("loader_discovered_prs", map[string]any{
@@ -389,6 +392,20 @@ func prepareRows(prs []model.PullRequest, cfg config.Config) ([]tui.Row, int) {
 		rows = append(rows, tui.Row{PR: pr, Loading: true})
 	}
 	return rows, excluded
+}
+
+func lifecyclePRs(prs []model.PullRequest, cfg config.Config) []model.PullRequest {
+	filtered := make([]model.PullRequest, 0, len(prs))
+	for _, pr := range prs {
+		if !config.RepoAllowedByOwner(pr.RepoFullName, cfg.Filters.IncludeOwners) {
+			continue
+		}
+		if config.RepoExcluded(pr.RepoFullName, cfg.Filters.ExcludeRepos) {
+			continue
+		}
+		filtered = append(filtered, pr)
+	}
+	return filtered
 }
 
 func refreshGitHubToken(ctx context.Context, host, currentToken string, logger *logpkg.Logger) (string, *ghapi.Client) {

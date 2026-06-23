@@ -28,13 +28,21 @@ query SearchPullRequests($query: String!, $first: Int!, $after: String) {
         number
         title
         url
+        state
+        merged
         isDraft
+        createdAt
         updatedAt
+        closedAt
+        mergedAt
         headRefName
         headRefOid
         baseRefName
         mergeStateStatus
         reviewDecision
+        author {
+          login
+        }
         repository {
           name
           nameWithOwner
@@ -42,6 +50,39 @@ query SearchPullRequests($query: String!, $first: Int!, $after: String) {
           owner {
             login
           }
+        }
+      }
+    }
+  }
+}`
+
+const pullRequestQuery = `
+query PullRequest($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      number
+      title
+      url
+      state
+      merged
+      isDraft
+      createdAt
+      updatedAt
+      closedAt
+      mergedAt
+      headRefName
+      headRefOid
+      baseRefName
+      mergeStateStatus
+      reviewDecision
+      author {
+        login
+      }
+      repository {
+        name
+        nameWithOwner
+        owner {
+          login
         }
       }
     }
@@ -105,6 +146,29 @@ func (c *Client) SearchAuthoredOpenPRs(ctx context.Context, limit int, includeOw
 		merged = merged[:limit]
 	}
 	return merged, nil
+}
+
+func (c *Client) PullRequest(ctx context.Context, repoFullName string, number int) (model.PullRequest, error) {
+	owner, repo, ok := strings.Cut(strings.TrimSpace(repoFullName), "/")
+	if !ok || owner == "" || repo == "" || number <= 0 {
+		return model.PullRequest{}, fmt.Errorf("invalid pull request identity %q#%d", repoFullName, number)
+	}
+	var response struct {
+		Repository struct {
+			PullRequest pullRequestNode `json:"pullRequest"`
+		} `json:"repository"`
+	}
+	if err := c.graphql(ctx, pullRequestQuery, map[string]any{
+		"owner":  owner,
+		"repo":   repo,
+		"number": number,
+	}, &response); err != nil {
+		return model.PullRequest{}, err
+	}
+	if response.Repository.PullRequest.Number == 0 {
+		return model.PullRequest{}, fmt.Errorf("pull request %s#%d not found", repoFullName, number)
+	}
+	return pullRequestFromNode(response.Repository.PullRequest), nil
 }
 
 type monitoredAuthor struct {
@@ -213,21 +277,7 @@ func (c *Client) searchOpenPRsByAuthorQuery(ctx context.Context, author string, 
 			if node.Repository.IsArchived {
 				continue
 			}
-			prs = append(prs, model.PullRequest{
-				Owner:            node.Repository.Owner.Login,
-				Repo:             node.Repository.Name,
-				RepoFullName:     node.Repository.NameWithOwner,
-				Number:           node.Number,
-				Title:            node.Title,
-				URL:              node.URL,
-				IsDraft:          node.IsDraft,
-				UpdatedAt:        node.UpdatedAt.Time,
-				HeadRefName:      node.HeadRefName,
-				HeadSHA:          node.HeadRefOid,
-				BaseRefName:      node.BaseRefName,
-				MergeStateStatus: node.MergeStateStatus,
-				ReviewDecision:   node.ReviewDecision,
-			})
+			prs = append(prs, pullRequestFromNode(node))
 			if len(prs) >= limit {
 				break
 			}
@@ -240,6 +290,30 @@ func (c *Client) searchOpenPRsByAuthorQuery(ctx context.Context, author string, 
 	}
 
 	return prs, nil
+}
+
+func pullRequestFromNode(node pullRequestNode) model.PullRequest {
+	return model.PullRequest{
+		Owner:            node.Repository.Owner.Login,
+		Repo:             node.Repository.Name,
+		RepoFullName:     node.Repository.NameWithOwner,
+		Number:           node.Number,
+		Title:            node.Title,
+		URL:              node.URL,
+		Author:           node.Author.Login,
+		State:            node.State,
+		Merged:           node.Merged,
+		IsDraft:          node.IsDraft,
+		CreatedAt:        node.CreatedAt.Time,
+		UpdatedAt:        node.UpdatedAt.Time,
+		ClosedAt:         node.ClosedAt.Time,
+		MergedAt:         node.MergedAt.Time,
+		HeadRefName:      node.HeadRefName,
+		HeadSHA:          node.HeadRefOid,
+		BaseRefName:      node.BaseRefName,
+		MergeStateStatus: node.MergeStateStatus,
+		ReviewDecision:   node.ReviewDecision,
+	}
 }
 
 func normalizeSearchValues(values []string) []string {
@@ -266,25 +340,35 @@ type searchPullRequestsResponse struct {
 			HasNextPage bool   `json:"hasNextPage"`
 			EndCursor   string `json:"endCursor"`
 		} `json:"pageInfo"`
-		Nodes []struct {
-			Number           int    `json:"number"`
-			Title            string `json:"title"`
-			URL              string `json:"url"`
-			IsDraft          bool   `json:"isDraft"`
-			UpdatedAt        githubTime
-			HeadRefName      string `json:"headRefName"`
-			HeadRefOid       string `json:"headRefOid"`
-			BaseRefName      string `json:"baseRefName"`
-			MergeStateStatus string `json:"mergeStateStatus"`
-			ReviewDecision   string `json:"reviewDecision"`
-			Repository       struct {
-				Name          string `json:"name"`
-				NameWithOwner string `json:"nameWithOwner"`
-				IsArchived    bool   `json:"isArchived"`
-				Owner         struct {
-					Login string `json:"login"`
-				} `json:"owner"`
-			} `json:"repository"`
-		} `json:"nodes"`
+		Nodes []pullRequestNode `json:"nodes"`
 	} `json:"search"`
+}
+
+type pullRequestNode struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	URL    string `json:"url"`
+	Author struct {
+		Login string `json:"login"`
+	} `json:"author"`
+	State            string `json:"state"`
+	Merged           bool   `json:"merged"`
+	IsDraft          bool   `json:"isDraft"`
+	CreatedAt        githubTime
+	UpdatedAt        githubTime
+	ClosedAt         githubTime
+	MergedAt         githubTime
+	HeadRefName      string `json:"headRefName"`
+	HeadRefOid       string `json:"headRefOid"`
+	BaseRefName      string `json:"baseRefName"`
+	MergeStateStatus string `json:"mergeStateStatus"`
+	ReviewDecision   string `json:"reviewDecision"`
+	Repository       struct {
+		Name          string `json:"name"`
+		NameWithOwner string `json:"nameWithOwner"`
+		IsArchived    bool   `json:"isArchived"`
+		Owner         struct {
+			Login string `json:"login"`
+		} `json:"owner"`
+	} `json:"repository"`
 }

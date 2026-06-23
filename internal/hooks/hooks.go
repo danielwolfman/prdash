@@ -22,6 +22,10 @@ const (
 	EventFirstCheckFailure = "first_check_failure"
 	EventChecksCompleted   = "checks_completed"
 	EventNewPRActivity     = "new_pr_comment_or_review"
+	EventNewPRByAuthor     = "new_pr_by_author"
+	EventPRReadyForReview  = "pr_ready_for_review"
+	EventPRClosed          = "pr_closed"
+	EventPRMerged          = "pr_merged"
 )
 
 const defaultTimeout = 30 * time.Second
@@ -66,7 +70,14 @@ type PRPayload struct {
 	RepoFullName     string `json:"repo_full_name"`
 	Number           int    `json:"number"`
 	URL              string `json:"url"`
+	Author           string `json:"author"`
+	State            string `json:"state"`
+	Merged           bool   `json:"merged"`
 	IsDraft          bool   `json:"is_draft"`
+	CreatedAt        string `json:"created_at,omitempty"`
+	UpdatedAt        string `json:"updated_at,omitempty"`
+	ClosedAt         string `json:"closed_at,omitempty"`
+	MergedAt         string `json:"merged_at,omitempty"`
 	HeadRefName      string `json:"head_ref_name"`
 	HeadSHA          string `json:"head_sha"`
 	BaseRefName      string `json:"base_ref_name"`
@@ -127,8 +138,10 @@ type ActivityPayload struct {
 }
 
 type stateFile struct {
-	PRHeads      map[string]headState     `json:"pr_heads"`
-	PRActivities map[string]activityState `json:"pr_activities"`
+	PRHeads                map[string]headState      `json:"pr_heads"`
+	PRActivities           map[string]activityState  `json:"pr_activities"`
+	PRLifecycles           map[string]lifecycleState `json:"pr_lifecycles"`
+	PRLifecycleInitialized bool                      `json:"pr_lifecycle_initialized,omitempty"`
 }
 
 type headState struct {
@@ -144,6 +157,30 @@ type activityState struct {
 	Seen        map[string]string `json:"seen,omitempty"`
 	UpdatedAt   string            `json:"updated_at,omitempty"`
 }
+
+type lifecycleState struct {
+	Owner                 string `json:"owner,omitempty"`
+	Repo                  string `json:"repo,omitempty"`
+	RepoFullName          string `json:"repo_full_name,omitempty"`
+	Number                int    `json:"number,omitempty"`
+	URL                   string `json:"url,omitempty"`
+	Author                string `json:"author,omitempty"`
+	State                 string `json:"state,omitempty"`
+	Merged                bool   `json:"merged,omitempty"`
+	Open                  bool   `json:"open,omitempty"`
+	IsDraft               bool   `json:"is_draft,omitempty"`
+	HeadSHA               string `json:"head_sha,omitempty"`
+	ReadyForReviewHeadSHA string `json:"ready_for_review_head_sha,omitempty"`
+	ClosedEventFired      bool   `json:"closed_event_fired,omitempty"`
+	MergedEventFired      bool   `json:"merged_event_fired,omitempty"`
+	CreatedAt             string `json:"created_at,omitempty"`
+	UpdatedAt             string `json:"updated_at,omitempty"`
+	ClosedAt              string `json:"closed_at,omitempty"`
+	MergedAt              string `json:"merged_at,omitempty"`
+	ObservedAt            string `json:"observed_at,omitempty"`
+}
+
+type PullRequestLookup func(context.Context, model.PullRequest) (model.PullRequest, error)
 
 func NewDispatcher(cfg config.Config, logger Logger) (*Dispatcher, error) {
 	commands := validCommands(cfg.Hooks.Commands, logger)
@@ -162,6 +199,7 @@ func NewDispatcher(cfg config.Config, logger Logger) (*Dispatcher, error) {
 		state: stateFile{
 			PRHeads:      map[string]headState{},
 			PRActivities: map[string]activityState{},
+			PRLifecycles: map[string]lifecycleState{},
 		},
 	}
 	if dispatcher.enabled {
@@ -178,6 +216,18 @@ func (d *Dispatcher) WantsPullRequestActivity() bool {
 	}
 	for _, command := range d.commands {
 		if command.Event == EventNewPRActivity {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Dispatcher) WantsPullRequestLifecycle() bool {
+	if d == nil || !d.enabled {
+		return false
+	}
+	for _, command := range d.commands {
+		if isLifecycleEvent(command.Event) {
 			return true
 		}
 	}
@@ -314,6 +364,122 @@ func (d *Dispatcher) ObserveActivities(ctx context.Context, pr model.PullRequest
 	}
 }
 
+func (d *Dispatcher) ObserveLifecycles(ctx context.Context, prs []model.PullRequest, lookup PullRequestLookup) {
+	if d == nil || !d.enabled || !d.WantsPullRequestLifecycle() {
+		return
+	}
+	now := d.now().UTC()
+	seen := make(map[string]bool, len(prs))
+	var payloads []Payload
+	var missing []lifecycleState
+
+	d.mu.Lock()
+	if d.state.PRLifecycles == nil {
+		d.state.PRLifecycles = map[string]lifecycleState{}
+	}
+	firstObservation := !d.state.PRLifecycleInitialized
+	for _, pr := range prs {
+		key := lifecycleStateKey(pr)
+		if key == "" {
+			continue
+		}
+		seen[key] = true
+		current := lifecycleStateFromPR(pr, now)
+		previous, ok := d.state.PRLifecycles[key]
+		if !ok {
+			if !firstObservation {
+				payloads = append(payloads, d.lifecyclePayload(EventNewPRByAuthor, now, pr))
+			}
+			d.state.PRLifecycles[key] = current
+			continue
+		}
+		if previous.Open && previous.IsDraft && !pr.IsDraft && previous.ReadyForReviewHeadSHA != pr.HeadSHA {
+			current.ReadyForReviewHeadSHA = pr.HeadSHA
+			payloads = append(payloads, d.lifecyclePayload(EventPRReadyForReview, now, pr))
+		} else {
+			current.ReadyForReviewHeadSHA = previous.ReadyForReviewHeadSHA
+		}
+		current.ClosedEventFired = previous.ClosedEventFired
+		current.MergedEventFired = previous.MergedEventFired
+		d.state.PRLifecycles[key] = current
+	}
+	if firstObservation {
+		d.state.PRLifecycleInitialized = true
+	}
+	for key, previous := range d.state.PRLifecycles {
+		if seen[key] || !previous.Open || previous.Number == 0 || previous.RepoFullName == "" {
+			continue
+		}
+		missing = append(missing, previous)
+	}
+	if err := d.saveStateLocked(); err != nil && d.logger != nil {
+		d.logger.Error("hook_state_save_error", map[string]any{
+			"state_path": d.statePath,
+			"error":      err.Error(),
+		})
+	}
+	d.mu.Unlock()
+
+	for _, previous := range missing {
+		if lookup == nil {
+			continue
+		}
+		live, err := lookup(ctx, pullRequestFromLifecycleState(previous))
+		if err != nil {
+			if d.logger != nil {
+				d.logger.Warn("hook_lifecycle_lookup_error", map[string]any{
+					"repo":      previous.RepoFullName,
+					"pr_number": previous.Number,
+					"error":     err.Error(),
+				})
+			}
+			continue
+		}
+		event := ""
+		if live.Merged {
+			event = EventPRMerged
+		} else if strings.EqualFold(strings.TrimSpace(live.State), "CLOSED") {
+			event = EventPRClosed
+		}
+		if event == "" {
+			continue
+		}
+		shouldDispatch := false
+		d.mu.Lock()
+		current := d.state.PRLifecycles[lifecycleStateKey(live)]
+		if event == EventPRMerged && !current.MergedEventFired {
+			current.MergedEventFired = true
+			current.Open = false
+			shouldDispatch = true
+		}
+		if event == EventPRClosed && !current.ClosedEventFired {
+			current.ClosedEventFired = true
+			current.Open = false
+			shouldDispatch = true
+		}
+		updated := lifecycleStateFromPR(live, now)
+		updated.ReadyForReviewHeadSHA = current.ReadyForReviewHeadSHA
+		updated.ClosedEventFired = current.ClosedEventFired
+		updated.MergedEventFired = current.MergedEventFired
+		updated.Open = current.Open
+		d.state.PRLifecycles[lifecycleStateKey(live)] = updated
+		if err := d.saveStateLocked(); err != nil && d.logger != nil {
+			d.logger.Error("hook_state_save_error", map[string]any{
+				"state_path": d.statePath,
+				"error":      err.Error(),
+			})
+		}
+		d.mu.Unlock()
+		if shouldDispatch {
+			payloads = append(payloads, d.lifecyclePayload(event, now, live))
+		}
+	}
+
+	for _, payload := range payloads {
+		d.dispatch(ctx, payload)
+	}
+}
+
 func (d *Dispatcher) dispatch(ctx context.Context, payload Payload) {
 	for _, command := range d.commands {
 		if command.Event != payload.Event {
@@ -408,6 +574,17 @@ func (d *Dispatcher) activityPayload(event string, observedAt time.Time, pr mode
 	}
 }
 
+func (d *Dispatcher) lifecyclePayload(event string, observedAt time.Time, pr model.PullRequest) Payload {
+	return Payload{
+		SchemaVersion: 1,
+		Event:         event,
+		ObservedAt:    observedAt.Format(time.RFC3339Nano),
+		GitHubHost:    d.host,
+		PR:            prPayload(pr),
+		WorkflowRuns:  []RunPayload{},
+	}
+}
+
 func prPayload(pr model.PullRequest) PRPayload {
 	return PRPayload{
 		Owner:            pr.Owner,
@@ -415,7 +592,14 @@ func prPayload(pr model.PullRequest) PRPayload {
 		RepoFullName:     pr.RepoFullName,
 		Number:           pr.Number,
 		URL:              pr.URL,
+		Author:           pr.Author,
+		State:            pr.State,
+		Merged:           pr.Merged,
 		IsDraft:          pr.IsDraft,
+		CreatedAt:        formatTime(pr.CreatedAt),
+		UpdatedAt:        formatTime(pr.UpdatedAt),
+		ClosedAt:         formatTime(pr.ClosedAt),
+		MergedAt:         formatTime(pr.MergedAt),
 		HeadRefName:      pr.HeadRefName,
 		HeadSHA:          pr.HeadSHA,
 		BaseRefName:      pr.BaseRefName,
@@ -488,11 +672,15 @@ func (d *Dispatcher) loadState() error {
 		if d.state.PRActivities == nil {
 			d.state.PRActivities = map[string]activityState{}
 		}
+		if d.state.PRLifecycles == nil {
+			d.state.PRLifecycles = map[string]lifecycleState{}
+		}
 		return nil
 	}
 	if os.IsNotExist(err) {
 		d.state.PRHeads = map[string]headState{}
 		d.state.PRActivities = map[string]activityState{}
+		d.state.PRLifecycles = map[string]lifecycleState{}
 		return nil
 	}
 	return err
@@ -504,6 +692,9 @@ func (d *Dispatcher) saveStateLocked() error {
 	}
 	if d.state.PRActivities == nil {
 		d.state.PRActivities = map[string]activityState{}
+	}
+	if d.state.PRLifecycles == nil {
+		d.state.PRLifecycles = map[string]lifecycleState{}
 	}
 	data, err := json.MarshalIndent(d.state, "", "  ")
 	if err != nil {
@@ -522,6 +713,58 @@ func stateKey(pr model.PullRequest) string {
 
 func activityStateKey(pr model.PullRequest) string {
 	return fmt.Sprintf("%s#%d", strings.ToLower(pr.RepoFullName), pr.Number)
+}
+
+func lifecycleStateKey(pr model.PullRequest) string {
+	if pr.RepoFullName == "" || pr.Number <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s#%d", strings.ToLower(pr.RepoFullName), pr.Number)
+}
+
+func lifecycleStateFromPR(pr model.PullRequest, observedAt time.Time) lifecycleState {
+	return lifecycleState{
+		Owner:        pr.Owner,
+		Repo:         pr.Repo,
+		RepoFullName: pr.RepoFullName,
+		Number:       pr.Number,
+		URL:          pr.URL,
+		Author:       pr.Author,
+		State:        pr.State,
+		Merged:       pr.Merged,
+		Open:         !pr.Merged && !strings.EqualFold(strings.TrimSpace(pr.State), "CLOSED"),
+		IsDraft:      pr.IsDraft,
+		HeadSHA:      pr.HeadSHA,
+		CreatedAt:    formatTime(pr.CreatedAt),
+		UpdatedAt:    formatTime(pr.UpdatedAt),
+		ClosedAt:     formatTime(pr.ClosedAt),
+		MergedAt:     formatTime(pr.MergedAt),
+		ObservedAt:   observedAt.Format(time.RFC3339Nano),
+	}
+}
+
+func pullRequestFromLifecycleState(state lifecycleState) model.PullRequest {
+	return model.PullRequest{
+		Owner:        state.Owner,
+		Repo:         state.Repo,
+		RepoFullName: state.RepoFullName,
+		Number:       state.Number,
+		URL:          state.URL,
+		Author:       state.Author,
+		State:        state.State,
+		Merged:       state.Merged,
+		IsDraft:      state.IsDraft,
+		HeadSHA:      state.HeadSHA,
+	}
+}
+
+func isLifecycleEvent(event string) bool {
+	switch event {
+	case EventNewPRByAuthor, EventPRReadyForReview, EventPRClosed, EventPRMerged:
+		return true
+	default:
+		return false
+	}
 }
 
 func checksTerminal(summary model.CheckSummary) bool {

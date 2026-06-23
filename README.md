@@ -70,6 +70,26 @@ timeout_seconds = 30
 event = "new_pr_comment_or_review"
 command = ["/path/to/pr-activity-hook"]
 timeout_seconds = 60
+
+[[hooks.commands]]
+event = "new_pr_by_author"
+command = ["/path/to/pr-lifecycle-hook"]
+timeout_seconds = 60
+
+[[hooks.commands]]
+event = "pr_ready_for_review"
+command = ["/path/to/pr-lifecycle-hook"]
+timeout_seconds = 60
+
+[[hooks.commands]]
+event = "pr_merged"
+command = ["/path/to/pr-lifecycle-hook"]
+timeout_seconds = 60
+
+[[hooks.commands]]
+event = "pr_closed"
+command = ["/path/to/pr-lifecycle-hook"]
+timeout_seconds = 60
 ```
 
 Hook commands receive a JSON payload on stdin. Hook state is stored under the user cache directory by default; set `[hooks].state_path` to override it.
@@ -79,8 +99,12 @@ Supported events:
 - `first_check_failure`: fires once per visible PR head SHA when `prdash` first observes at least one failed job, or when GitHub reports the PR merge state as `DIRTY`.
 - `checks_completed`: fires when all observed jobs for a visible PR head reach a terminal state, whether the final result is success, failure, cancellation, neutral, or action required. If checks are rerun or replaced and `prdash` observes that head move back to a non-terminal state, it fires again when the new check epoch completes.
 - `new_pr_comment_or_review`: establishes a baseline on first observation, then fires for newly observed top-level PR comments and submitted PR reviews.
+- `new_pr_by_author`: establishes a monitored-PR baseline on first observation, then fires when a new monitored open PR appears in authored/configured-author discovery.
+- `pr_ready_for_review`: fires once per PR head SHA when a monitored PR changes from draft to ready for review.
+- `pr_merged`: fires when a previously observed monitored open PR disappears from open discovery and a direct GitHub lookup verifies it was merged.
+- `pr_closed`: fires when a previously observed monitored open PR disappears from open discovery and a direct GitHub lookup verifies it was closed without merging.
 
-Check-event payloads include PR metadata, a check summary, workflow runs, failed jobs, and `primary_job` for the earliest completed failed job when one exists. Dirty merge-state events may have no failed jobs and no `primary_job`; use `pr.merge_state_status` to identify that case. PR activity payloads include an `activity` object with the activity kind, author, URL, body text, review state, and timestamps.
+Check-event payloads include PR metadata, a check summary, workflow runs, failed jobs, and `primary_job` for the earliest completed failed job when one exists. Dirty merge-state events may have no failed jobs and no `primary_job`; use `pr.merge_state_status` to identify that case. PR activity payloads include an `activity` object with the activity kind, author, URL, body text, review state, and timestamps. PR lifecycle payloads include PR metadata and no workflow runs.
 
 Example payload fragment:
 
@@ -165,6 +189,11 @@ timeout_seconds = 120
 
 [[hooks.commands]]
 event = "new_pr_comment_or_review"
+command = ["/path/to/prdash-claude-bridge"]
+timeout_seconds = 120
+
+[[hooks.commands]]
+event = "new_pr_by_author"
 command = ["/path/to/prdash-claude-bridge"]
 timeout_seconds = 120
 ```

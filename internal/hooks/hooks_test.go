@@ -288,6 +288,121 @@ func TestDispatcherBaselinesThenFiresNewPRActivity(t *testing.T) {
 	calls.assertNoMore(t)
 }
 
+func TestDispatcherBaselinesThenFiresNewPRLifecycle(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	pr.Author = "octo-user"
+	pr.State = "OPEN"
+	pr.IsDraft = true
+	pr.CreatedAt = time.Date(2026, 6, 8, 8, 0, 0, 0, time.UTC)
+
+	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{pr}, nil)
+	calls.assertNoMore(t)
+
+	newPR := pr
+	newPR.Number = 8
+	newPR.URL = "https://github.com/octo-org/prdash/pull/8"
+	newPR.HeadSHA = "def456"
+	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{pr, newPR}, nil)
+
+	gotCalls := calls.collect(t, 1)
+	if gotCalls[0].Event != EventNewPRByAuthor {
+		t.Fatalf("event = %q, want %q", gotCalls[0].Event, EventNewPRByAuthor)
+	}
+	if gotCalls[0].PR.Author != "octo-user" || gotCalls[0].PR.Number != 8 || gotCalls[0].PR.State != "OPEN" {
+		t.Fatalf("pr payload = %#v", gotCalls[0].PR)
+	}
+	calls.assertNoMore(t)
+}
+
+func TestDispatcherFiresReadyForReviewOncePerHead(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	pr.State = "OPEN"
+	pr.IsDraft = true
+	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{pr}, nil)
+	calls.assertNoMore(t)
+
+	ready := pr
+	ready.IsDraft = false
+	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{ready}, nil)
+	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{ready}, nil)
+
+	gotCalls := calls.collect(t, 1)
+	if gotCalls[0].Event != EventPRReadyForReview {
+		t.Fatalf("event = %q, want %q", gotCalls[0].Event, EventPRReadyForReview)
+	}
+	if gotCalls[0].PR.IsDraft {
+		t.Fatalf("ready payload still marked draft: %#v", gotCalls[0].PR)
+	}
+	calls.assertNoMore(t)
+}
+
+func TestDispatcherFiresMergedAfterVerifiedMissingPR(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	pr.State = "OPEN"
+	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{pr}, nil)
+	calls.assertNoMore(t)
+
+	merged := pr
+	merged.State = "MERGED"
+	merged.Merged = true
+	merged.MergedAt = time.Date(2026, 6, 8, 9, 0, 0, 0, time.UTC)
+	dispatcher.ObserveLifecycles(context.Background(), nil, func(context.Context, model.PullRequest) (model.PullRequest, error) {
+		return merged, nil
+	})
+	dispatcher.ObserveLifecycles(context.Background(), nil, func(context.Context, model.PullRequest) (model.PullRequest, error) {
+		return merged, nil
+	})
+
+	gotCalls := calls.collect(t, 1)
+	if gotCalls[0].Event != EventPRMerged {
+		t.Fatalf("event = %q, want %q", gotCalls[0].Event, EventPRMerged)
+	}
+	if !gotCalls[0].PR.Merged || gotCalls[0].PR.MergedAt == "" {
+		t.Fatalf("merged payload = %#v", gotCalls[0].PR)
+	}
+	calls.assertNoMore(t)
+}
+
+func TestDispatcherFiresClosedAfterVerifiedMissingPR(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	pr.State = "OPEN"
+	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{pr}, nil)
+	calls.assertNoMore(t)
+
+	closed := pr
+	closed.State = "CLOSED"
+	closed.ClosedAt = time.Date(2026, 6, 8, 9, 0, 0, 0, time.UTC)
+	dispatcher.ObserveLifecycles(context.Background(), nil, func(context.Context, model.PullRequest) (model.PullRequest, error) {
+		return closed, nil
+	})
+
+	gotCalls := calls.collect(t, 1)
+	if gotCalls[0].Event != EventPRClosed {
+		t.Fatalf("event = %q, want %q", gotCalls[0].Event, EventPRClosed)
+	}
+	if gotCalls[0].PR.ClosedAt == "" || gotCalls[0].PR.Merged {
+		t.Fatalf("closed payload = %#v", gotCalls[0].PR)
+	}
+	calls.assertNoMore(t)
+}
+
+func TestDispatcherDoesNotCloseMissingButStillOpenPR(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	pr.State = "OPEN"
+	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{pr}, nil)
+	calls.assertNoMore(t)
+
+	dispatcher.ObserveLifecycles(context.Background(), nil, func(context.Context, model.PullRequest) (model.PullRequest, error) {
+		return pr, nil
+	})
+	calls.assertNoMore(t)
+}
+
 func TestRunCommandSendsPayloadOnStdin(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "payload.json")
@@ -368,6 +483,10 @@ func testDispatcher(t *testing.T) (*Dispatcher, payloadCollector) {
 		{Event: EventFirstCheckFailure, Command: []string{"hook"}},
 		{Event: EventChecksCompleted, Command: []string{"hook"}},
 		{Event: EventNewPRActivity, Command: []string{"hook"}},
+		{Event: EventNewPRByAuthor, Command: []string{"hook"}},
+		{Event: EventPRReadyForReview, Command: []string{"hook"}},
+		{Event: EventPRClosed, Command: []string{"hook"}},
+		{Event: EventPRMerged, Command: []string{"hook"}},
 	}
 	dispatcher, err := NewDispatcher(cfg, nil)
 	if err != nil {
@@ -388,6 +507,8 @@ func testPR() model.PullRequest {
 		RepoFullName: "octo-org/prdash",
 		Number:       7,
 		URL:          "https://github.com/octo-org/prdash/pull/7",
+		Author:       "octo-user",
+		State:        "OPEN",
 		HeadRefName:  "feature",
 		HeadSHA:      "abc123",
 		BaseRefName:  "main",

@@ -157,6 +157,63 @@ func TestSearchAuthoredOpenPRs(t *testing.T) {
 	}
 }
 
+func TestPullRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/graphql" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req graphqlRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(req.Query, "PullRequest(") {
+			t.Fatalf("unexpected graphql query: %s", req.Query)
+		}
+		if req.Variables["owner"] != "octo-org" || req.Variables["repo"] != "prdash" || req.Variables["number"] != float64(12) && req.Variables["number"] != 12 {
+			t.Fatalf("unexpected variables: %#v", req.Variables)
+		}
+		writeJSON(t, w, map[string]any{
+			"data": map[string]any{
+				"repository": map[string]any{
+					"pullRequest": map[string]any{
+						"number":           12,
+						"title":            "Add dashboard",
+						"url":              "https://github.com/octo-org/prdash/pull/12",
+						"author":           map[string]any{"login": "octo-user"},
+						"state":            "MERGED",
+						"merged":           true,
+						"isDraft":          false,
+						"createdAt":        "2026-06-01T13:00:00Z",
+						"updatedAt":        "2026-06-01T14:00:00Z",
+						"closedAt":         "2026-06-01T15:00:00Z",
+						"mergedAt":         "2026-06-01T15:00:00Z",
+						"headRefName":      "feature/dashboard",
+						"headRefOid":       "abc123",
+						"baseRefName":      "main",
+						"mergeStateStatus": "CLEAN",
+						"reviewDecision":   "APPROVED",
+						"repository": map[string]any{
+							"name":          "prdash",
+							"nameWithOwner": "octo-org/prdash",
+							"owner":         map[string]any{"login": "octo-org"},
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token", WithBaseURLs(server.URL, server.URL+"/graphql"))
+	pr, err := client.PullRequest(context.Background(), "octo-org/prdash", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.Author != "octo-user" || pr.State != "MERGED" || !pr.Merged || pr.MergedAt.IsZero() {
+		t.Fatalf("unexpected lifecycle metadata: %+v", pr)
+	}
+}
+
 func TestCurrentWorkflowRunsWithJobs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

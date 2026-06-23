@@ -9,8 +9,14 @@ type PullRequest struct {
 	Number           int
 	Title            string
 	URL              string
+	Author           string
+	State            string
+	Merged           bool
 	IsDraft          bool
+	CreatedAt        time.Time
 	UpdatedAt        time.Time
+	ClosedAt         time.Time
+	MergedAt         time.Time
 	HeadRefName      string
 	HeadSHA          string
 	BaseRefName      string
