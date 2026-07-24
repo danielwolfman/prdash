@@ -72,6 +72,11 @@ command = ["/path/to/pr-activity-hook"]
 timeout_seconds = 60
 
 [[hooks.commands]]
+event = "pr_discovered"
+command = ["/path/to/pr-lifecycle-hook"]
+timeout_seconds = 60
+
+[[hooks.commands]]
 event = "new_pr_by_author"
 command = ["/path/to/pr-lifecycle-hook"]
 timeout_seconds = 60
@@ -99,6 +104,7 @@ Supported events:
 - `first_check_failure`: fires once per visible PR head SHA when `prdash` first observes at least one failed job, or when GitHub reports the PR merge state as `DIRTY`.
 - `checks_completed`: fires when all observed jobs for a visible PR head reach a terminal state, whether the final result is success, failure, cancellation, neutral, or action required. If checks are rerun or replaced and `prdash` observes that head move back to a non-terminal state, it fires again when the new check epoch completes.
 - `new_pr_comment_or_review`: establishes a baseline on first observation, then fires for newly observed top-level PR comments and submitted PR reviews.
+- `pr_discovered`: fires once per monitored open PR in each `prdash` process, including the initial discovery baseline. This lets idempotent hook consumers ensure external per-PR state after either side restarts or is reinstalled.
 - `new_pr_by_author`: establishes a monitored-PR baseline on first observation, then fires when a new monitored open PR appears in authored/configured-author discovery.
 - `pr_ready_for_review`: fires once per PR head SHA when a monitored PR changes from draft to ready for review.
 - `pr_merged`: fires when a previously observed monitored open PR disappears from open discovery and a direct GitHub lookup verifies it was merged.
@@ -189,6 +195,11 @@ timeout_seconds = 120
 
 [[hooks.commands]]
 event = "new_pr_comment_or_review"
+command = ["/path/to/prdash-claude-bridge"]
+timeout_seconds = 120
+
+[[hooks.commands]]
+event = "pr_discovered"
 command = ["/path/to/prdash-claude-bridge"]
 timeout_seconds = 120
 

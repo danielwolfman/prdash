@@ -315,6 +315,47 @@ func TestDispatcherBaselinesThenFiresNewPRLifecycle(t *testing.T) {
 	calls.assertNoMore(t)
 }
 
+func TestDispatcherFiresPRDiscoveredOncePerProcess(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "hooks-state.json")
+	newDispatcher := func() (*Dispatcher, payloadCollector) {
+		cfg := config.Default()
+		cfg.Hooks.Enabled = true
+		cfg.Hooks.StatePath = statePath
+		cfg.Hooks.Commands = []config.HookCommandConfig{
+			{Event: EventPRDiscovered, Command: []string{"hook"}},
+		}
+		dispatcher, err := NewDispatcher(cfg, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := payloadCollector{ch: make(chan Payload, 10)}
+		dispatcher.execute = func(_ context.Context, _ config.HookCommandConfig, payload Payload) error {
+			calls.ch <- payload
+			return nil
+		}
+		return dispatcher, calls
+	}
+
+	pr := testPR()
+	dispatcher, calls := newDispatcher()
+	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{pr}, nil)
+	got := calls.collect(t, 1)
+	if got[0].Event != EventPRDiscovered || got[0].PR.Number != pr.Number {
+		t.Fatalf("payload = %#v, want pr_discovered for PR %d", got[0], pr.Number)
+	}
+	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{pr}, nil)
+	calls.assertNoMore(t)
+
+	// Discovery is process-local even though lifecycle dedupe state persists.
+	restarted, restartedCalls := newDispatcher()
+	restarted.ObserveLifecycles(context.Background(), []model.PullRequest{pr}, nil)
+	restartedPayload := restartedCalls.collect(t, 1)
+	if restartedPayload[0].Event != EventPRDiscovered {
+		t.Fatalf("event after restart = %q, want %q", restartedPayload[0].Event, EventPRDiscovered)
+	}
+	restartedCalls.assertNoMore(t)
+}
+
 func TestDispatcherFiresReadyForReviewOncePerHead(t *testing.T) {
 	dispatcher, calls := testDispatcher(t)
 	pr := testPR()

@@ -22,6 +22,7 @@ const (
 	EventFirstCheckFailure = "first_check_failure"
 	EventChecksCompleted   = "checks_completed"
 	EventNewPRActivity     = "new_pr_comment_or_review"
+	EventPRDiscovered      = "pr_discovered"
 	EventNewPRByAuthor     = "new_pr_by_author"
 	EventPRReadyForReview  = "pr_ready_for_review"
 	EventPRClosed          = "pr_closed"
@@ -49,6 +50,11 @@ type Dispatcher struct {
 
 	mu    sync.Mutex
 	state stateFile
+
+	// discovered is intentionally process-local. Re-emitting pr_discovered once
+	// per process lets idempotent hook consumers repair missing external state
+	// after prdash or the consumer was reinstalled.
+	discovered map[string]struct{}
 }
 
 type Payload struct {
@@ -202,6 +208,7 @@ func NewDispatcher(cfg config.Config, logger Logger) (*Dispatcher, error) {
 			PRActivities: map[string]activityState{},
 			PRLifecycles: map[string]lifecycleState{},
 		},
+		discovered: map[string]struct{}{},
 	}
 	if dispatcher.enabled {
 		if err := dispatcher.loadState(); err != nil {
@@ -386,6 +393,12 @@ func (d *Dispatcher) ObserveLifecycles(ctx context.Context, prs []model.PullRequ
 		}
 		seen[key] = true
 		current := lifecycleStateFromPR(pr, now)
+		if current.Open {
+			if _, alreadyDiscovered := d.discovered[key]; !alreadyDiscovered {
+				d.discovered[key] = struct{}{}
+				payloads = append(payloads, d.lifecyclePayload(EventPRDiscovered, now, pr))
+			}
+		}
 		previous, ok := d.state.PRLifecycles[key]
 		if !ok {
 			if !firstObservation {
@@ -772,7 +785,7 @@ func pullRequestFromLifecycleState(state lifecycleState) model.PullRequest {
 
 func isLifecycleEvent(event string) bool {
 	switch event {
-	case EventNewPRByAuthor, EventPRReadyForReview, EventPRClosed, EventPRMerged:
+	case EventPRDiscovered, EventNewPRByAuthor, EventPRReadyForReview, EventPRClosed, EventPRMerged:
 		return true
 	default:
 		return false
