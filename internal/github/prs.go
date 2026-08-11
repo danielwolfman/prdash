@@ -38,6 +38,7 @@ query SearchPullRequests($query: String!, $first: Int!, $after: String) {
         headRefName
         headRefOid
         baseRefName
+        baseRefOid
         mergeStateStatus
         reviewDecision
         author {
@@ -73,6 +74,7 @@ query PullRequest($owner: String!, $repo: String!, $number: Int!) {
       headRefName
       headRefOid
       baseRefName
+      baseRefOid
       mergeStateStatus
       reviewDecision
       author {
@@ -311,6 +313,7 @@ func pullRequestFromNode(node pullRequestNode) model.PullRequest {
 		HeadRefName:      node.HeadRefName,
 		HeadSHA:          node.HeadRefOid,
 		BaseRefName:      node.BaseRefName,
+		BaseSHA:          node.BaseRefOid,
 		MergeStateStatus: node.MergeStateStatus,
 		ReviewDecision:   node.ReviewDecision,
 	}
@@ -361,6 +364,7 @@ type pullRequestNode struct {
 	HeadRefName      string `json:"headRefName"`
 	HeadRefOid       string `json:"headRefOid"`
 	BaseRefName      string `json:"baseRefName"`
+	BaseRefOid       string `json:"baseRefOid"`
 	MergeStateStatus string `json:"mergeStateStatus"`
 	ReviewDecision   string `json:"reviewDecision"`
 	Repository       struct {

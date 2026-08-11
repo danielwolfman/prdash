@@ -55,6 +55,7 @@ func TestSearchAuthoredOpenPRs(t *testing.T) {
 						"headRefName":      "feature/dashboard",
 						"headRefOid":       "abc123",
 						"baseRefName":      "main",
+						"baseRefOid":       "base123",
 						"mergeStateStatus": "BLOCKED",
 						"reviewDecision":   "REVIEW_REQUIRED",
 						"repository": map[string]any{
@@ -152,7 +153,7 @@ func TestSearchAuthoredOpenPRs(t *testing.T) {
 	if pr.Owner != "octo-org" || pr.Repo != "prdash" || pr.Number != 12 || pr.HeadSHA != "abc123" {
 		t.Fatalf("unexpected pr: %+v", pr)
 	}
-	if !pr.IsDraft || pr.MergeStateStatus != "BLOCKED" || pr.ReviewDecision != "REVIEW_REQUIRED" {
+	if !pr.IsDraft || pr.BaseSHA != "base123" || pr.MergeStateStatus != "BLOCKED" || pr.ReviewDecision != "REVIEW_REQUIRED" {
 		t.Fatalf("missing PR badges: %+v", pr)
 	}
 }

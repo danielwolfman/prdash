@@ -20,6 +20,11 @@ type PullRequest struct {
 	HeadRefName      string
 	HeadSHA          string
 	BaseRefName      string
+	BaseSHA          string
 	MergeStateStatus string
 	ReviewDecision   string
+	StackNumber      int
+	StackPosition    int
+	StackSize        int
+	StackNeedsRebase bool
 }

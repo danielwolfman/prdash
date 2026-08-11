@@ -19,15 +19,16 @@ import (
 )
 
 const (
-	EventFirstCheckFailure = "first_check_failure"
-	EventMergeConflict     = "merge_conflict"
-	EventChecksCompleted   = "checks_completed"
-	EventNewPRActivity     = "new_pr_comment_or_review"
-	EventPRDiscovered      = "pr_discovered"
-	EventNewPRByAuthor     = "new_pr_by_author"
-	EventPRReadyForReview  = "pr_ready_for_review"
-	EventPRClosed          = "pr_closed"
-	EventPRMerged          = "pr_merged"
+	EventFirstCheckFailure   = "first_check_failure"
+	EventMergeConflict       = "merge_conflict"
+	EventStackRebaseRequired = "stack_rebase_required"
+	EventChecksCompleted     = "checks_completed"
+	EventNewPRActivity       = "new_pr_comment_or_review"
+	EventPRDiscovered        = "pr_discovered"
+	EventNewPRByAuthor       = "new_pr_by_author"
+	EventPRReadyForReview    = "pr_ready_for_review"
+	EventPRClosed            = "pr_closed"
+	EventPRMerged            = "pr_merged"
 )
 
 const defaultTimeout = 30 * time.Second
@@ -88,8 +89,13 @@ type PRPayload struct {
 	HeadRefName      string `json:"head_ref_name"`
 	HeadSHA          string `json:"head_sha"`
 	BaseRefName      string `json:"base_ref_name"`
+	BaseSHA          string `json:"base_sha"`
 	MergeStateStatus string `json:"merge_state_status"`
 	ReviewDecision   string `json:"review_decision"`
+	StackNumber      int    `json:"stack_number,omitempty"`
+	StackPosition    int    `json:"stack_position,omitempty"`
+	StackSize        int    `json:"stack_size,omitempty"`
+	StackNeedsRebase bool   `json:"stack_needs_rebase,omitempty"`
 }
 
 type SummaryPayload struct {
@@ -154,6 +160,7 @@ type stateFile struct {
 type headState struct {
 	FirstCheckFailureFired bool   `json:"first_check_failure_fired,omitempty"`
 	MergeConflictActive    bool   `json:"merge_conflict_active,omitempty"`
+	StackRebaseActive      bool   `json:"stack_rebase_active,omitempty"`
 	ChecksCompletedFired   bool   `json:"checks_completed_fired,omitempty"`
 	LastChecksCompletedKey string `json:"last_checks_completed_key,omitempty"`
 	LastState              string `json:"last_state,omitempty"`
@@ -334,6 +341,40 @@ func (d *Dispatcher) Observe(ctx context.Context, pr model.PullRequest, runs []m
 
 	for _, payload := range payloads {
 		d.dispatch(ctx, payload)
+	}
+}
+
+func (d *Dispatcher) ObserveStackReadiness(ctx context.Context, pr model.PullRequest) {
+	if d == nil || !d.enabled {
+		return
+	}
+
+	active := pr.StackNumber > 0 && pr.StackNeedsRebase
+	key := stateKey(pr)
+	now := d.now().UTC()
+	var payload *Payload
+
+	d.mu.Lock()
+	head := d.state.PRHeads[key]
+	if active && !head.StackRebaseActive {
+		value := d.lifecyclePayload(EventStackRebaseRequired, now, pr)
+		payload = &value
+	}
+	if head.StackRebaseActive != active {
+		head.StackRebaseActive = active
+		head.UpdatedAt = now.Format(time.RFC3339Nano)
+		d.state.PRHeads[key] = head
+		if err := d.saveStateLocked(); err != nil && d.logger != nil {
+			d.logger.Error("hook_state_save_error", map[string]any{
+				"state_path": d.statePath,
+				"error":      err.Error(),
+			})
+		}
+	}
+	d.mu.Unlock()
+
+	if payload != nil {
+		d.dispatch(ctx, *payload)
 	}
 }
 
@@ -651,8 +692,13 @@ func prPayload(pr model.PullRequest) PRPayload {
 		HeadRefName:      pr.HeadRefName,
 		HeadSHA:          pr.HeadSHA,
 		BaseRefName:      pr.BaseRefName,
+		BaseSHA:          pr.BaseSHA,
 		MergeStateStatus: pr.MergeStateStatus,
 		ReviewDecision:   pr.ReviewDecision,
+		StackNumber:      pr.StackNumber,
+		StackPosition:    pr.StackPosition,
+		StackSize:        pr.StackSize,
+		StackNeedsRebase: pr.StackNeedsRebase,
 	}
 }
 

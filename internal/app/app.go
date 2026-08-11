@@ -314,6 +314,11 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 				}
 				continue
 			}
+			stackReadinessLoaded := true
+			if err := client.PopulateStackReadiness(ctx, prs); err != nil {
+				stackReadinessLoaded = false
+				logger.Warn("loader_stack_readiness_error", map[string]any{"error": err.Error()})
+			}
 
 			hookDispatcher.ObserveLifecycles(ctx, lifecyclePRs(prs, cfg), func(ctx context.Context, pr model.PullRequest) (model.PullRequest, error) {
 				return client.PullRequest(ctx, pr.RepoFullName, pr.Number)
@@ -339,6 +344,9 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 			}
 			for i := range rows {
 				row := rows[i]
+				if stackReadinessLoaded {
+					hookDispatcher.ObserveStackReadiness(ctx, row.PR)
+				}
 				events <- tui.LoadEvent{Row: &row, TotalDiscovered: len(prs), ExcludedCount: excluded, RefreshInterval: refreshInterval}
 			}
 			streamJobFetches(ctx, client, rows, cfg.Limits.MaxConcurrentRequests, len(prs), excluded, events, logger, hookDispatcher)

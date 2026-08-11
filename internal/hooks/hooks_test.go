@@ -290,6 +290,55 @@ func TestDispatcherFiresMergeConflictAgainAfterItClears(t *testing.T) {
 	calls.assertNoMore(t)
 }
 
+func TestDispatcherEmitsStackRebaseRequiredOnTransition(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	pr.BaseSHA = "old-base"
+	pr.StackNumber = 42
+	pr.StackPosition = 2
+	pr.StackSize = 4
+	pr.StackNeedsRebase = true
+
+	dispatcher.ObserveStackReadiness(context.Background(), pr)
+	dispatcher.ObserveStackReadiness(context.Background(), pr)
+
+	gotCalls := calls.collect(t, 1)
+	if gotCalls[0].Event != EventStackRebaseRequired {
+		t.Fatalf("event = %q, want %q", gotCalls[0].Event, EventStackRebaseRequired)
+	}
+	if gotCalls[0].PR.StackNumber != 42 || gotCalls[0].PR.StackPosition != 2 || !gotCalls[0].PR.StackNeedsRebase {
+		t.Fatalf("stack payload = %#v", gotCalls[0].PR)
+	}
+	if gotCalls[0].PR.BaseSHA != "old-base" {
+		t.Fatalf("base SHA = %q, want old-base", gotCalls[0].PR.BaseSHA)
+	}
+	calls.assertNoMore(t)
+}
+
+func TestDispatcherEmitsStackRebaseRequiredAgainAfterItClears(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	pr.StackNumber = 42
+	pr.StackNeedsRebase = true
+
+	dispatcher.ObserveStackReadiness(context.Background(), pr)
+	first := calls.collect(t, 1)
+	if first[0].Event != EventStackRebaseRequired {
+		t.Fatalf("event = %q, want %q", first[0].Event, EventStackRebaseRequired)
+	}
+
+	pr.StackNeedsRebase = false
+	dispatcher.ObserveStackReadiness(context.Background(), pr)
+	pr.StackNeedsRebase = true
+	dispatcher.ObserveStackReadiness(context.Background(), pr)
+
+	second := calls.collect(t, 1)
+	if second[0].Event != EventStackRebaseRequired {
+		t.Fatalf("event = %q, want %q", second[0].Event, EventStackRebaseRequired)
+	}
+	calls.assertNoMore(t)
+}
+
 func TestDispatcherBaselinesThenFiresNewPRActivity(t *testing.T) {
 	dispatcher, calls := testDispatcher(t)
 	pr := testPR()
@@ -580,6 +629,7 @@ func testDispatcher(t *testing.T) (*Dispatcher, payloadCollector) {
 	cfg.Hooks.Commands = []config.HookCommandConfig{
 		{Event: EventFirstCheckFailure, Command: []string{"hook"}},
 		{Event: EventMergeConflict, Command: []string{"hook"}},
+		{Event: EventStackRebaseRequired, Command: []string{"hook"}},
 		{Event: EventChecksCompleted, Command: []string{"hook"}},
 		{Event: EventNewPRActivity, Command: []string{"hook"}},
 		{Event: EventNewPRByAuthor, Command: []string{"hook"}},
