@@ -20,6 +20,7 @@ import (
 
 const (
 	EventFirstCheckFailure = "first_check_failure"
+	EventMergeConflict     = "merge_conflict"
 	EventChecksCompleted   = "checks_completed"
 	EventNewPRActivity     = "new_pr_comment_or_review"
 	EventPRDiscovered      = "pr_discovered"
@@ -152,6 +153,7 @@ type stateFile struct {
 
 type headState struct {
 	FirstCheckFailureFired bool   `json:"first_check_failure_fired,omitempty"`
+	MergeConflictActive    bool   `json:"merge_conflict_active,omitempty"`
 	ChecksCompletedFired   bool   `json:"checks_completed_fired,omitempty"`
 	LastChecksCompletedKey string `json:"last_checks_completed_key,omitempty"`
 	LastState              string `json:"last_state,omitempty"`
@@ -260,23 +262,44 @@ func (d *Dispatcher) Observe(ctx context.Context, pr model.PullRequest, runs []m
 
 	jobs := allJobs(runs)
 	mergeDirty := isDirtyMergeState(pr.MergeStateStatus)
+	key := stateKey(pr)
+	now := d.now().UTC()
 	if len(jobs) == 0 && !mergeDirty {
+		d.mu.Lock()
+		head := d.state.PRHeads[key]
+		if head.MergeConflictActive {
+			head.MergeConflictActive = false
+			head.UpdatedAt = now.Format(time.RFC3339Nano)
+			d.state.PRHeads[key] = head
+			if err := d.saveStateLocked(); err != nil && d.logger != nil {
+				d.logger.Error("hook_state_save_error", map[string]any{
+					"state_path": d.statePath,
+					"error":      err.Error(),
+				})
+			}
+		}
+		d.mu.Unlock()
 		return
 	}
 	summary := model.SummarizeJobs(jobs)
 	if mergeDirty && summary.Failure == 0 {
 		summary.State = model.CheckFailure
 	}
-	key := stateKey(pr)
-	now := d.now().UTC()
 
 	var payloads []Payload
 	var stateChanged bool
 	d.mu.Lock()
 	head := d.state.PRHeads[key]
-	if firstFailureObserved(summary, mergeDirty) && !head.FirstCheckFailureFired {
+	if firstFailureObserved(summary) && !head.FirstCheckFailureFired {
 		head.FirstCheckFailureFired = true
 		payloads = append(payloads, d.payload(EventFirstCheckFailure, now, pr, runs, summary))
+		stateChanged = true
+	}
+	if mergeDirty && !head.MergeConflictActive {
+		payloads = append(payloads, d.payload(EventMergeConflict, now, pr, runs, summary))
+	}
+	if head.MergeConflictActive != mergeDirty {
+		head.MergeConflictActive = mergeDirty
 		stateChanged = true
 	}
 	if checksTerminal(summary) {
@@ -800,8 +823,8 @@ func checksTerminal(summary model.CheckSummary) bool {
 		summary.Stale == 0
 }
 
-func firstFailureObserved(summary model.CheckSummary, mergeDirty bool) bool {
-	return summary.Failure > 0 || mergeDirty
+func firstFailureObserved(summary model.CheckSummary) bool {
+	return summary.Failure > 0
 }
 
 func shouldFireChecksCompleted(head headState, completionKey string) bool {

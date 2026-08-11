@@ -62,6 +62,11 @@ command = ["/path/to/prdash-hook"]
 timeout_seconds = 60
 
 [[hooks.commands]]
+event = "merge_conflict"
+command = ["/path/to/prdash-hook"]
+timeout_seconds = 60
+
+[[hooks.commands]]
 event = "checks_completed"
 command = ["/path/to/another-hook"]
 timeout_seconds = 30
@@ -101,7 +106,8 @@ Hook commands receive a JSON payload on stdin. Hook state is stored under the us
 
 Supported events:
 
-- `first_check_failure`: fires once per visible PR head SHA when `prdash` first observes at least one failed job, or when GitHub reports the PR merge state as `DIRTY`.
+- `first_check_failure`: fires once per visible PR head SHA when `prdash` first observes at least one failed job.
+- `merge_conflict`: fires when a visible PR enters GitHub's `DIRTY` merge state. It can fire again for the same head SHA after the conflict clears and is later reintroduced.
 - `checks_completed`: fires when all observed jobs for a visible PR head reach a terminal state, whether the final result is success, failure, cancellation, neutral, or action required. If checks are rerun or replaced and `prdash` observes that head move back to a non-terminal state, it fires again when the new check epoch completes.
 - `new_pr_comment_or_review`: establishes a baseline on first observation, then fires for newly observed top-level PR comments and submitted PR reviews.
 - `pr_discovered`: fires once per monitored open PR in each `prdash` process, including the initial discovery baseline. This lets idempotent hook consumers ensure external per-PR state after either side restarts or is reinstalled.
@@ -110,7 +116,7 @@ Supported events:
 - `pr_merged`: fires when a previously observed monitored open PR disappears from open discovery and a direct GitHub lookup verifies it was merged.
 - `pr_closed`: fires when a previously observed monitored open PR disappears from open discovery and a direct GitHub lookup verifies it was closed without merging.
 
-Check-event payloads include PR metadata, a check summary, workflow runs, failed jobs, and `primary_job` for the earliest completed failed job when one exists. Dirty merge-state events may have no failed jobs and no `primary_job`; use `pr.merge_state_status` to identify that case. PR activity payloads include an `activity` object with the activity kind, author, URL, body text, review state, and timestamps. PR lifecycle payloads include PR metadata and no workflow runs.
+Check and merge-conflict event payloads include PR metadata, a check summary, workflow runs, failed jobs, and `primary_job` for the earliest completed failed job when one exists. Merge-conflict events may have no failed jobs and no `primary_job`; use `pr.merge_state_status` to identify that case. PR activity payloads include an `activity` object with the activity kind, author, URL, body text, review state, and timestamps. PR lifecycle payloads include PR metadata and no workflow runs.
 
 Example payload fragment:
 
@@ -159,7 +165,7 @@ activity_url=$(jq -r '.activity.url // ""' "$payload")
 activity_author=$(jq -r '.activity.author // ""' "$payload")
 
 case "$event" in
-  first_check_failure|new_pr_comment_or_review) ;;
+  first_check_failure|merge_conflict|new_pr_comment_or_review) ;;
   *) exit 0 ;;
 esac
 
@@ -190,6 +196,11 @@ Register the bridge in your config:
 ```toml
 [[hooks.commands]]
 event = "first_check_failure"
+command = ["/path/to/prdash-claude-bridge"]
+timeout_seconds = 120
+
+[[hooks.commands]]
+event = "merge_conflict"
 command = ["/path/to/prdash-claude-bridge"]
 timeout_seconds = 120
 

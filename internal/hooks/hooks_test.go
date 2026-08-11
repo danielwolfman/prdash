@@ -227,7 +227,7 @@ func TestDispatcherDoesNotDuplicateLegacyTerminalCompletion(t *testing.T) {
 	calls.assertNoMore(t)
 }
 
-func TestDispatcherTreatsDirtyMergeStateAsFirstFailure(t *testing.T) {
+func TestDispatcherEmitsMergeConflictForDirtyMergeState(t *testing.T) {
 	dispatcher, calls := testDispatcher(t)
 	pr := testPR()
 	pr.MergeStateStatus = "DIRTY"
@@ -236,8 +236,8 @@ func TestDispatcherTreatsDirtyMergeStateAsFirstFailure(t *testing.T) {
 	dispatcher.Observe(context.Background(), pr, nil)
 
 	gotCalls := calls.collect(t, 1)
-	if gotCalls[0].Event != EventFirstCheckFailure {
-		t.Fatalf("event = %q, want %q", gotCalls[0].Event, EventFirstCheckFailure)
+	if gotCalls[0].Event != EventMergeConflict {
+		t.Fatalf("event = %q, want %q", gotCalls[0].Event, EventMergeConflict)
 	}
 	if gotCalls[0].Summary.State != model.CheckFailure {
 		t.Fatalf("summary state = %q, want %q", gotCalls[0].Summary.State, model.CheckFailure)
@@ -247,6 +247,45 @@ func TestDispatcherTreatsDirtyMergeStateAsFirstFailure(t *testing.T) {
 	}
 	if gotCalls[0].PrimaryJob != nil {
 		t.Fatalf("primary job = %#v, want nil for dirty-only failure", gotCalls[0].PrimaryJob)
+	}
+	calls.assertNoMore(t)
+}
+
+func TestDispatcherFiresMergeConflictAfterCheckFailureOnSameHead(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	key := stateKey(pr)
+	dispatcher.state.PRHeads[key] = headState{FirstCheckFailureFired: true}
+	pr.MergeStateStatus = "DIRTY"
+
+	dispatcher.Observe(context.Background(), pr, nil)
+
+	gotCalls := calls.collect(t, 1)
+	if gotCalls[0].Event != EventMergeConflict {
+		t.Fatalf("event = %q, want %q", gotCalls[0].Event, EventMergeConflict)
+	}
+	calls.assertNoMore(t)
+}
+
+func TestDispatcherFiresMergeConflictAgainAfterItClears(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	pr.MergeStateStatus = "DIRTY"
+
+	dispatcher.Observe(context.Background(), pr, nil)
+	first := calls.collect(t, 1)
+	if first[0].Event != EventMergeConflict {
+		t.Fatalf("event = %q, want %q", first[0].Event, EventMergeConflict)
+	}
+
+	pr.MergeStateStatus = "CLEAN"
+	dispatcher.Observe(context.Background(), pr, nil)
+	pr.MergeStateStatus = "DIRTY"
+	dispatcher.Observe(context.Background(), pr, nil)
+
+	second := calls.collect(t, 1)
+	if second[0].Event != EventMergeConflict {
+		t.Fatalf("event = %q, want %q", second[0].Event, EventMergeConflict)
 	}
 	calls.assertNoMore(t)
 }
@@ -540,6 +579,7 @@ func testDispatcher(t *testing.T) (*Dispatcher, payloadCollector) {
 	cfg.Hooks.StatePath = filepath.Join(t.TempDir(), "hooks-state.json")
 	cfg.Hooks.Commands = []config.HookCommandConfig{
 		{Event: EventFirstCheckFailure, Command: []string{"hook"}},
+		{Event: EventMergeConflict, Command: []string{"hook"}},
 		{Event: EventChecksCompleted, Command: []string{"hook"}},
 		{Event: EventNewPRActivity, Command: []string{"hook"}},
 		{Event: EventNewPRByAuthor, Command: []string{"hook"}},
