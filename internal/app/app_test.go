@@ -53,9 +53,19 @@ func TestEstimateRefreshRequestsAllowsPaginatedJobLists(t *testing.T) {
 	}
 }
 
-func TestEstimateRefreshRequestsIncludesConfiguredHooks(t *testing.T) {
-	got := estimateRefreshRequests(40, 2)
-	want := 282
+func TestEstimateRefreshRequestsIncludesReviewThreadPagination(t *testing.T) {
+	cfg := config.Default()
+	cfg.Hooks.Enabled = true
+	cfg.Hooks.StatePath = filepath.Join(t.TempDir(), "hooks-state.json")
+	cfg.Hooks.Commands = []config.HookCommandConfig{{Event: hooks.EventReviewThreadChanged, Command: []string{"hook"}}}
+	dispatcher, err := hooks.NewDispatcher(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dispatcher.Close() })
+
+	got := estimateRefreshRequests(40, estimateHookRequestsPerRow(dispatcher))
+	want := 322
 	if got != want {
 		t.Fatalf("estimated requests = %d, want %d", got, want)
 	}

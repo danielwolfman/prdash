@@ -29,6 +29,8 @@ var (
 	Date    = "unknown"
 )
 
+const reviewThreadRequestAllowance = 3
+
 func New() *cobra.Command {
 	var configPath string
 	var limitOverride int
@@ -349,13 +351,7 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 			searchLimit = 100
 		}
 		includeAuthors := authorFiltersFromConfig(cfg)
-		hookRequestsPerRow := 0
-		if hookDispatcher.WantsPullRequestActivity() {
-			hookRequestsPerRow++
-		}
-		if hookDispatcher.WantsReviewThreads() {
-			hookRequestsPerRow++
-		}
+		hookRequestsPerRow := estimateHookRequestsPerRow(hookDispatcher)
 		refreshInterval := calculateRefreshInterval(cfg, cfg.Limits.MaxVisiblePRs, hookRequestsPerRow)
 		for {
 			events <- tui.LoadEvent{User: status.Account, Message: fmt.Sprintf("discovering up to %d monitored PRs", cfg.Limits.MaxVisiblePRs), SnapshotAt: time.Now()}
@@ -611,8 +607,19 @@ func estimateRefreshRequests(visibleRows, hookRequestsPerRow int) int {
 		hookRequestsPerRow = 0
 	}
 	// Each row needs one run-list request plus an allowance for paginated job
-	// lists. Enabled activity and review-thread hooks each add a GraphQL request.
+	// lists. Hook estimates include their expected GraphQL pagination.
 	return 2 + visibleRows*(5+hookRequestsPerRow)
+}
+
+func estimateHookRequestsPerRow(dispatcher *hooks.Dispatcher) int {
+	requests := 0
+	if dispatcher.WantsPullRequestActivity() {
+		requests++
+	}
+	if dispatcher.WantsReviewThreads() {
+		requests += reviewThreadRequestAllowance
+	}
+	return requests
 }
 
 func waitForRefresh(ctx context.Context, refresh <-chan struct{}, d time.Duration) (bool, error) {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -521,45 +522,25 @@ func (d *Dispatcher) ObserveReviewThreads(ctx context.Context, pr model.PullRequ
 	key := activityStateKey(pr)
 	now := d.now().UTC()
 
-	var payloads []Payload
 	d.mu.Lock()
-	state := d.state.PRReviewThreads[key]
+	previousState, hadPreviousState := d.state.PRReviewThreads[key]
+	state := previousState
+	state.Seen = maps.Clone(previousState.Seen)
 	if state.Seen == nil {
 		state.Seen = map[string]string{}
 	}
-	if !state.Initialized {
-		for _, thread := range threads {
-			if thread.ID != "" {
-				state.Seen[thread.ID] = reviewThreadFingerprint(thread)
-				if !thread.IsResolved {
-					payloads = append(payloads, d.reviewThreadPayload(now, pr, thread))
-				}
-			}
-		}
-		state.Initialized = true
-		state.UpdatedAt = now.Format(time.RFC3339Nano)
-		d.state.PRReviewThreads[key] = state
-		if err := d.saveStateLocked(); err != nil && d.logger != nil {
-			d.logger.Error("hook_state_save_error", map[string]any{
-				"state_path": d.statePath,
-				"error":      err.Error(),
-			})
-		}
-		d.mu.Unlock()
-		for _, payload := range payloads {
-			d.dispatch(ctx, payload)
-		}
-		return
-	}
-
-	stateChanged := false
+	initialObservation := !state.Initialized
+	stateChanged := initialObservation
+	var payloads []Payload
 	for _, thread := range threads {
 		if thread.ID == "" {
 			continue
 		}
 		fingerprint := reviewThreadFingerprint(thread)
-		if previous, ok := state.Seen[thread.ID]; ok && previous == fingerprint {
-			continue
+		if !initialObservation {
+			if previous, ok := state.Seen[thread.ID]; ok && previous == fingerprint {
+				continue
+			}
 		}
 		state.Seen[thread.ID] = fingerprint
 		stateChanged = true
@@ -567,15 +548,27 @@ func (d *Dispatcher) ObserveReviewThreads(ctx context.Context, pr model.PullRequ
 			payloads = append(payloads, d.reviewThreadPayload(now, pr, thread))
 		}
 	}
-	if stateChanged {
-		state.UpdatedAt = now.Format(time.RFC3339Nano)
-		d.state.PRReviewThreads[key] = state
-		if err := d.saveStateLocked(); err != nil && d.logger != nil {
+	state.Initialized = true
+	if !stateChanged {
+		d.mu.Unlock()
+		return
+	}
+	state.UpdatedAt = now.Format(time.RFC3339Nano)
+	d.state.PRReviewThreads[key] = state
+	if err := d.saveStateLocked(); err != nil {
+		if hadPreviousState {
+			d.state.PRReviewThreads[key] = previousState
+		} else {
+			delete(d.state.PRReviewThreads, key)
+		}
+		if d.logger != nil {
 			d.logger.Error("hook_state_save_error", map[string]any{
 				"state_path": d.statePath,
 				"error":      err.Error(),
 			})
 		}
+		d.mu.Unlock()
+		return
 	}
 	d.mu.Unlock()
 

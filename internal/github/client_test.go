@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/danielwolfman/prdash/internal/model"
 )
@@ -514,7 +516,7 @@ func TestPullRequestReviewThreads(t *testing.T) {
 			}
 			writeJSON(t, w, map[string]any{"data": map[string]any{"node": map[string]any{
 				"comments": reviewCommentsResponse(false, "", []map[string]any{
-					reviewCommentResponse("PRRC_2", "follow-up", "2026-06-01T14:05:00Z"),
+					reviewCommentResponse("PRRC_2", "follow-up", "2026-06-01T14:05:00Z", "2026-06-01T14:06:00Z"),
 				}),
 			}}})
 		case strings.Contains(req.Query, "PullRequestReviewThreads"):
@@ -524,7 +526,7 @@ func TestPullRequestReviewThreads(t *testing.T) {
 			if req.Variables["after"] == nil {
 				writeJSON(t, w, reviewThreadsResponse(true, "thread-page-1", []map[string]any{
 					reviewThreadResponse("PRRT_1", false, false, 42, 40, 41, 39, reviewCommentsResponse(true, "comment-page-1", []map[string]any{
-						reviewCommentResponse("PRRC_1", "please update this", "2026-06-01T14:00:00Z"),
+						reviewCommentResponse("PRRC_1", "please update this", "2026-06-01T14:00:00Z", "2026-06-01T14:01:00Z"),
 					})),
 				}))
 				return
@@ -534,7 +536,7 @@ func TestPullRequestReviewThreads(t *testing.T) {
 			}
 			writeJSON(t, w, reviewThreadsResponse(false, "", []map[string]any{
 				reviewThreadResponse("PRRT_2", false, true, nil, nil, 12, 10, reviewCommentsResponse(false, "", []map[string]any{
-					reviewCommentResponse("PRRC_3", "outdated location", "2026-06-01T14:10:00Z"),
+					reviewCommentResponse("PRRC_3", "outdated location", "2026-06-01T14:10:00Z", "2026-06-01T14:11:00Z"),
 				})),
 			}))
 		default:
@@ -555,22 +557,63 @@ func TestPullRequestReviewThreads(t *testing.T) {
 	if requests != 3 {
 		t.Fatalf("requests = %d, want 3", requests)
 	}
-	if len(threads) != 2 {
-		t.Fatalf("len(threads) = %d, want 2", len(threads))
+	line := 42
+	startLine := 40
+	originalLine := 41
+	originalStartLine := 39
+	outdatedOriginalLine := 12
+	outdatedOriginalStartLine := 10
+	want := []model.PullRequestReviewThread{
+		{
+			ID:                "PRRT_1",
+			Path:              "internal/app/app.go",
+			Line:              &line,
+			StartLine:         &startLine,
+			OriginalLine:      &originalLine,
+			OriginalStartLine: &originalStartLine,
+			DiffSide:          "RIGHT",
+			StartDiffSide:     "LEFT",
+			Comments: []model.PullRequestReviewComment{
+				{
+					ID:        "PRRC_1",
+					Author:    "reviewer",
+					URL:       "https://github.com/octo-org/prdash/pull/12#discussion_PRRC_1",
+					BodyText:  "please update this",
+					CreatedAt: time.Date(2026, 6, 1, 14, 0, 0, 0, time.UTC),
+					UpdatedAt: time.Date(2026, 6, 1, 14, 1, 0, 0, time.UTC),
+				},
+				{
+					ID:        "PRRC_2",
+					Author:    "reviewer",
+					URL:       "https://github.com/octo-org/prdash/pull/12#discussion_PRRC_2",
+					BodyText:  "follow-up",
+					CreatedAt: time.Date(2026, 6, 1, 14, 5, 0, 0, time.UTC),
+					UpdatedAt: time.Date(2026, 6, 1, 14, 6, 0, 0, time.UTC),
+				},
+			},
+		},
+		{
+			ID:                "PRRT_2",
+			IsOutdated:        true,
+			Path:              "internal/app/app.go",
+			OriginalLine:      &outdatedOriginalLine,
+			OriginalStartLine: &outdatedOriginalStartLine,
+			DiffSide:          "RIGHT",
+			StartDiffSide:     "LEFT",
+			Comments: []model.PullRequestReviewComment{
+				{
+					ID:        "PRRC_3",
+					Author:    "reviewer",
+					URL:       "https://github.com/octo-org/prdash/pull/12#discussion_PRRC_3",
+					BodyText:  "outdated location",
+					CreatedAt: time.Date(2026, 6, 1, 14, 10, 0, 0, time.UTC),
+					UpdatedAt: time.Date(2026, 6, 1, 14, 11, 0, 0, time.UTC),
+				},
+			},
+		},
 	}
-	thread := threads[0]
-	if thread.ID != "PRRT_1" || thread.IsResolved || thread.IsOutdated || thread.Path != "internal/app/app.go" || thread.Line == nil || *thread.Line != 42 {
-		t.Fatalf("unexpected review thread: %+v", thread)
-	}
-	if thread.OriginalStartLine == nil || *thread.OriginalStartLine != 39 || thread.StartDiffSide != "LEFT" {
-		t.Fatalf("missing original review location: %+v", thread)
-	}
-	if len(thread.Comments) != 2 || thread.Comments[0].BodyText != "please update this" || thread.Comments[1].BodyText != "follow-up" {
-		t.Fatalf("unexpected review comments: %+v", thread.Comments)
-	}
-	outdated := threads[1]
-	if !outdated.IsOutdated || outdated.Line != nil || outdated.OriginalLine == nil || *outdated.OriginalLine != 12 {
-		t.Fatalf("unexpected outdated review location: %+v", outdated)
+	if !reflect.DeepEqual(threads, want) {
+		t.Fatalf("review threads = %#v, want %#v", threads, want)
 	}
 }
 
@@ -606,14 +649,14 @@ func reviewCommentsResponse(hasNextPage bool, endCursor string, nodes []map[stri
 	}
 }
 
-func reviewCommentResponse(id, body, createdAt string) map[string]any {
+func reviewCommentResponse(id, body, createdAt, updatedAt string) map[string]any {
 	return map[string]any{
 		"id":        id,
 		"author":    map[string]any{"login": "reviewer"},
 		"bodyText":  body,
 		"url":       "https://github.com/octo-org/prdash/pull/12#discussion_" + id,
 		"createdAt": createdAt,
-		"updatedAt": createdAt,
+		"updatedAt": updatedAt,
 	}
 }
 
