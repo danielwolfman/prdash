@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/danielwolfman/prdash/internal/config"
 	"github.com/danielwolfman/prdash/internal/model"
+	"github.com/gofrs/flock"
 )
 
 const (
@@ -32,7 +34,12 @@ const (
 	EventPRMerged            = "pr_merged"
 )
 
-const defaultTimeout = 30 * time.Second
+const (
+	defaultTimeout            = 30 * time.Second
+	maxConcurrentHookCommands = 4
+)
+
+var ErrStateLocked = errors.New("hook state is owned by another prdash process")
 
 type Logger interface {
 	Info(string, map[string]any)
@@ -43,13 +50,16 @@ type Logger interface {
 type Executor func(context.Context, config.HookCommandConfig, Payload) error
 
 type Dispatcher struct {
-	enabled   bool
-	host      string
-	commands  []config.HookCommandConfig
-	statePath string
-	logger    Logger
-	execute   Executor
-	now       func() time.Time
+	enabled       bool
+	host          string
+	commands      []config.HookCommandConfig
+	statePath     string
+	logger        Logger
+	execute       Executor
+	now           func() time.Time
+	stateLock     *flock.Flock
+	dispatchSlots chan struct{}
+	dispatchWG    sync.WaitGroup
 
 	mu    sync.Mutex
 	state stateFile
@@ -153,14 +163,17 @@ type ActivityPayload struct {
 }
 
 type ReviewThreadPayload struct {
-	ID         string                 `json:"id"`
-	IsResolved bool                   `json:"is_resolved"`
-	IsOutdated bool                   `json:"is_outdated"`
-	Path       string                 `json:"path"`
-	Line       int                    `json:"line,omitempty"`
-	StartLine  int                    `json:"start_line,omitempty"`
-	DiffSide   string                 `json:"diff_side,omitempty"`
-	Comments   []ReviewCommentPayload `json:"comments"`
+	ID                string                 `json:"id"`
+	IsResolved        bool                   `json:"is_resolved"`
+	IsOutdated        bool                   `json:"is_outdated"`
+	Path              string                 `json:"path"`
+	Line              *int                   `json:"line,omitempty"`
+	StartLine         *int                   `json:"start_line,omitempty"`
+	OriginalLine      *int                   `json:"original_line,omitempty"`
+	OriginalStartLine *int                   `json:"original_start_line,omitempty"`
+	DiffSide          string                 `json:"diff_side,omitempty"`
+	StartDiffSide     string                 `json:"start_diff_side,omitempty"`
+	Comments          []ReviewCommentPayload `json:"comments"`
 }
 
 type ReviewCommentPayload struct {
@@ -228,13 +241,14 @@ func NewDispatcher(cfg config.Config, logger Logger) (*Dispatcher, error) {
 		return nil, err
 	}
 	dispatcher := &Dispatcher{
-		enabled:   cfg.Hooks.Enabled && len(commands) > 0,
-		host:      cfg.GitHub.Host,
-		commands:  commands,
-		statePath: statePath,
-		logger:    logger,
-		execute:   runCommand,
-		now:       time.Now,
+		enabled:       cfg.Hooks.Enabled && len(commands) > 0,
+		host:          cfg.GitHub.Host,
+		commands:      commands,
+		statePath:     statePath,
+		logger:        logger,
+		execute:       runCommand,
+		now:           time.Now,
+		dispatchSlots: make(chan struct{}, maxConcurrentHookCommands),
 		state: stateFile{
 			PRHeads:         map[string]headState{},
 			PRActivities:    map[string]activityState{},
@@ -244,11 +258,39 @@ func NewDispatcher(cfg config.Config, logger Logger) (*Dispatcher, error) {
 		discovered: map[string]struct{}{},
 	}
 	if dispatcher.enabled {
+		if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+			return nil, err
+		}
+		stateLock := flock.New(statePath + ".lock")
+		locked, err := stateLock.TryLock()
+		if err != nil {
+			return nil, fmt.Errorf("lock hook state: %w", err)
+		}
+		if !locked {
+			return nil, fmt.Errorf("%w: %s", ErrStateLocked, statePath)
+		}
+		dispatcher.stateLock = stateLock
 		if err := dispatcher.loadState(); err != nil {
+			_ = stateLock.Close()
 			return nil, err
 		}
 	}
 	return dispatcher, nil
+}
+
+func (d *Dispatcher) Close() error {
+	if d == nil {
+		return nil
+	}
+	d.dispatchWG.Wait()
+	d.mu.Lock()
+	stateLock := d.stateLock
+	d.stateLock = nil
+	d.mu.Unlock()
+	if stateLock == nil {
+		return nil
+	}
+	return stateLock.Close()
 }
 
 func (d *Dispatcher) WantsPullRequestActivity() bool {
@@ -681,7 +723,15 @@ func (d *Dispatcher) dispatch(ctx context.Context, payload Payload) {
 			continue
 		}
 		command := command
+		select {
+		case d.dispatchSlots <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		d.dispatchWG.Add(1)
 		go func() {
+			defer d.dispatchWG.Done()
+			defer func() { <-d.dispatchSlots }()
 			if d.logger != nil {
 				d.logger.Info("hook_dispatch_start", map[string]any{
 					"event":     payload.Event,
@@ -788,14 +838,17 @@ func (d *Dispatcher) reviewThreadPayload(observedAt time.Time, pr model.PullRequ
 		GitHubHost:    d.host,
 		PR:            prPayload(pr),
 		ReviewThread: &ReviewThreadPayload{
-			ID:         thread.ID,
-			IsResolved: thread.IsResolved,
-			IsOutdated: thread.IsOutdated,
-			Path:       thread.Path,
-			Line:       thread.Line,
-			StartLine:  thread.StartLine,
-			DiffSide:   thread.DiffSide,
-			Comments:   comments,
+			ID:                thread.ID,
+			IsResolved:        thread.IsResolved,
+			IsOutdated:        thread.IsOutdated,
+			Path:              thread.Path,
+			Line:              thread.Line,
+			StartLine:         thread.StartLine,
+			OriginalLine:      thread.OriginalLine,
+			OriginalStartLine: thread.OriginalStartLine,
+			DiffSide:          thread.DiffSide,
+			StartDiffSide:     thread.StartDiffSide,
+			Comments:          comments,
 		},
 		WorkflowRuns: []RunPayload{},
 	}

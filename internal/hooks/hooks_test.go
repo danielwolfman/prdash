@@ -3,6 +3,7 @@ package hooks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -379,11 +380,15 @@ func TestDispatcherBaselinesThenFiresNewPRActivity(t *testing.T) {
 func TestDispatcherEmitsNewOrChangedUnresolvedReviewThreads(t *testing.T) {
 	dispatcher, calls := testDispatcher(t)
 	pr := testPR()
+	line := 42
+	originalLine := 41
 	initial := model.PullRequestReviewThread{
-		ID:       "PRRT_1",
-		Path:     "internal/app/app.go",
-		Line:     42,
-		DiffSide: "RIGHT",
+		ID:            "PRRT_1",
+		Path:          "internal/app/app.go",
+		Line:          &line,
+		OriginalLine:  &originalLine,
+		DiffSide:      "RIGHT",
+		StartDiffSide: "LEFT",
 		Comments: []model.PullRequestReviewComment{
 			{
 				ID:        "PRRC_1",
@@ -400,6 +405,9 @@ func TestDispatcherEmitsNewOrChangedUnresolvedReviewThreads(t *testing.T) {
 	initialCall := calls.collect(t, 1)[0]
 	if initialCall.ReviewThread == nil || initialCall.ReviewThread.ID != "PRRT_1" {
 		t.Fatalf("initial review thread payload = %#v", initialCall.ReviewThread)
+	}
+	if initialCall.ReviewThread.OriginalLine == nil || *initialCall.ReviewThread.OriginalLine != 41 || initialCall.ReviewThread.StartDiffSide != "LEFT" {
+		t.Fatalf("initial review thread location = %#v", initialCall.ReviewThread)
 	}
 	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{initial})
 	calls.assertNoMore(t)
@@ -442,6 +450,107 @@ func TestDispatcherEmitsNewOrChangedUnresolvedReviewThreads(t *testing.T) {
 		t.Fatalf("new review thread payload = %#v", newCall.ReviewThread)
 	}
 	calls.assertNoMore(t)
+}
+
+func TestDispatcherPersistsReviewThreadStateAcrossRestarts(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "hooks-state.json")
+	line := 42
+	thread := model.PullRequestReviewThread{
+		ID:   "PRRT_1",
+		Path: "internal/app/app.go",
+		Line: &line,
+		Comments: []model.PullRequestReviewComment{
+			{ID: "PRRC_1", BodyText: "please update this"},
+		},
+	}
+	pr := testPR()
+
+	first, firstCalls := testDispatcherAt(t, statePath)
+	first.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{thread})
+	firstCalls.collect(t, 1)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, secondCalls := testDispatcherAt(t, statePath)
+	second.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{thread})
+	secondCalls.assertNoMore(t)
+	resolved := thread
+	resolved.IsResolved = true
+	second.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{resolved})
+	secondCalls.assertNoMore(t)
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	third, thirdCalls := testDispatcherAt(t, statePath)
+	third.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{thread})
+	reopened := thirdCalls.collect(t, 1)[0]
+	if reopened.ReviewThread == nil || reopened.ReviewThread.IsResolved {
+		t.Fatalf("reopened review thread payload = %#v", reopened.ReviewThread)
+	}
+	thirdCalls.assertNoMore(t)
+}
+
+func TestDispatcherAllowsOnlyOneStateOwner(t *testing.T) {
+	cfg := config.Default()
+	cfg.Hooks.Enabled = true
+	cfg.Hooks.StatePath = filepath.Join(t.TempDir(), "hooks-state.json")
+	cfg.Hooks.Commands = []config.HookCommandConfig{{Event: EventReviewThreadChanged, Command: []string{"hook"}}}
+
+	first, err := NewDispatcher(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	if _, err := NewDispatcher(cfg, nil); !errors.Is(err, ErrStateLocked) {
+		t.Fatalf("second dispatcher error = %v, want %v", err, ErrStateLocked)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := NewDispatcher(cfg, nil)
+	if err != nil {
+		t.Fatalf("replacement dispatcher: %v", err)
+	}
+	t.Cleanup(func() { _ = replacement.Close() })
+}
+
+func TestDispatcherBoundsConcurrentHookCommands(t *testing.T) {
+	dispatcher, _ := testDispatcher(t)
+	started := make(chan struct{}, 20)
+	release := make(chan struct{})
+	dispatcher.execute = func(_ context.Context, _ config.HookCommandConfig, _ Payload) error {
+		started <- struct{}{}
+		<-release
+		return nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 20 {
+			dispatcher.dispatch(context.Background(), Payload{Event: EventReviewThreadChanged})
+		}
+	}()
+	for range maxConcurrentHookCommands {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for hook command")
+		}
+	}
+	select {
+	case <-started:
+		t.Fatalf("more than %d hook commands started concurrently", maxConcurrentHookCommands)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out draining hook commands")
+	}
 }
 
 func TestDispatcherBaselinesThenFiresNewPRLifecycle(t *testing.T) {
@@ -501,6 +610,9 @@ func TestDispatcherFiresPRDiscoveredOncePerProcess(t *testing.T) {
 	}
 	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{pr}, nil)
 	calls.assertNoMore(t)
+	if err := dispatcher.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Discovery is process-local even though lifecycle dedupe state persists.
 	restarted, restartedCalls := newDispatcher()
@@ -691,9 +803,14 @@ func findPayload(payloads []Payload, event string) (Payload, bool) {
 
 func testDispatcher(t *testing.T) (*Dispatcher, payloadCollector) {
 	t.Helper()
+	return testDispatcherAt(t, filepath.Join(t.TempDir(), "hooks-state.json"))
+}
+
+func testDispatcherAt(t *testing.T, statePath string) (*Dispatcher, payloadCollector) {
+	t.Helper()
 	cfg := config.Default()
 	cfg.Hooks.Enabled = true
-	cfg.Hooks.StatePath = filepath.Join(t.TempDir(), "hooks-state.json")
+	cfg.Hooks.StatePath = statePath
 	cfg.Hooks.Commands = []config.HookCommandConfig{
 		{Event: EventFirstCheckFailure, Command: []string{"hook"}},
 		{Event: EventMergeConflict, Command: []string{"hook"}},
@@ -710,6 +827,7 @@ func testDispatcher(t *testing.T) (*Dispatcher, payloadCollector) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = dispatcher.Close() })
 	calls := payloadCollector{ch: make(chan Payload, 10)}
 	dispatcher.execute = func(_ context.Context, _ config.HookCommandConfig, payload Payload) error {
 		calls.ch <- payload

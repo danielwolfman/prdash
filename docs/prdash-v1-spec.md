@@ -2,7 +2,7 @@
 
 ## Goals
 
-`prdash` is a general-purpose open-source local terminal dashboard for GitHub PRs authored by the authenticated user plus configured monitored authors. It should be useful for dogfooding first, then hardened through public early releases.
+`prdash` is a general-purpose open-source local monitor for GitHub PRs authored by the authenticated user plus configured monitored authors, with an interactive terminal dashboard and a headless hook mode. It should be useful for dogfooding first, then hardened through public early releases.
 
 ## Non-Goals
 
@@ -10,7 +10,7 @@
 - Review-request dashboard.
 - Job-level rerun controls.
 - Redacted support bundle command.
-- OS notifications, sound, Slack, or daemon mode.
+- Built-in OS notifications, sound, or Slack integrations.
 - GitHub Enterprise Server as an officially supported target.
 - Required-check-only aggregation.
 

@@ -58,6 +58,8 @@ prdash watch
 prdash watch --limit 10
 ```
 
+Only one process owns hook dispatch for a state file. If headless watch is already running, the TUI still opens but reports that hooks are handled by another `prdash` process. If the TUI owns hooks first, `prdash watch` exits with a clear ownership error; close the TUI, start watch, and then reopen the TUI for display-only monitoring. Operating-system file locks are released automatically when the owner exits or crashes.
+
 ## PR Event Hooks
 
 `prdash` can run local commands when observed PR activity crosses useful boundaries. Hooks are disabled by default and are configured with argv arrays so users can invoke a script directly or explicitly opt into shell behavior.
@@ -138,7 +140,7 @@ Supported events:
 - `pr_merged`: fires when a previously observed monitored open PR disappears from open discovery and a direct GitHub lookup verifies it was merged.
 - `pr_closed`: fires when a previously observed monitored open PR disappears from open discovery and a direct GitHub lookup verifies it was closed without merging.
 
-Check and merge-conflict event payloads include PR metadata, a check summary, workflow runs, failed jobs, and `primary_job` for the earliest completed failed job when one exists. Merge-conflict events may have no failed jobs and no `primary_job`; use `pr.merge_state_status` to identify that case. Stack-rebase-required events contain stack metadata and no workflow runs. PR activity payloads include an `activity` object with the activity kind, author, URL, body text, review state, and timestamps. Review-thread payloads include a `review_thread` object with its path, line, resolution and outdated state, and comments. PR lifecycle payloads include PR metadata and no workflow runs.
+Check and merge-conflict event payloads include PR metadata, a check summary, workflow runs, failed jobs, and `primary_job` for the earliest completed failed job when one exists. Merge-conflict events may have no failed jobs and no `primary_job`; use `pr.merge_state_status` to identify that case. Stack-rebase-required events contain stack metadata and no workflow runs. PR activity payloads include an `activity` object with the activity kind, author, URL, body text, review state, and timestamps. Review-thread payloads include a `review_thread` object with nullable current positions, original line/range positions, diff sides, resolution and outdated state, and the complete comment history. PR lifecycle payloads include PR metadata and no workflow runs. Hook commands run with a global concurrency limit of four; additional events wait instead of launching unbounded subprocesses.
 
 Example payload fragment:
 

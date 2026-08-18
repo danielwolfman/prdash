@@ -497,6 +497,7 @@ func TestPullRequestActivities(t *testing.T) {
 }
 
 func TestPullRequestReviewThreads(t *testing.T) {
+	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/graphql" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -505,45 +506,40 @@ func TestPullRequestReviewThreads(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(req.Query, "PullRequestReviewThreads") {
+		requests++
+		switch {
+		case strings.Contains(req.Query, "PullRequestReviewThreadComments"):
+			if req.Variables["id"] != "PRRT_1" || req.Variables["after"] != "comment-page-1" {
+				t.Fatalf("unexpected comment variables: %#v", req.Variables)
+			}
+			writeJSON(t, w, map[string]any{"data": map[string]any{"node": map[string]any{
+				"comments": reviewCommentsResponse(false, "", []map[string]any{
+					reviewCommentResponse("PRRC_2", "follow-up", "2026-06-01T14:05:00Z"),
+				}),
+			}}})
+		case strings.Contains(req.Query, "PullRequestReviewThreads"):
+			if req.Variables["first"] != float64(100) && req.Variables["first"] != 100 {
+				t.Fatalf("first = %#v, want 100", req.Variables["first"])
+			}
+			if req.Variables["after"] == nil {
+				writeJSON(t, w, reviewThreadsResponse(true, "thread-page-1", []map[string]any{
+					reviewThreadResponse("PRRT_1", false, false, 42, 40, 41, 39, reviewCommentsResponse(true, "comment-page-1", []map[string]any{
+						reviewCommentResponse("PRRC_1", "please update this", "2026-06-01T14:00:00Z"),
+					})),
+				}))
+				return
+			}
+			if req.Variables["after"] != "thread-page-1" {
+				t.Fatalf("unexpected thread cursor: %#v", req.Variables["after"])
+			}
+			writeJSON(t, w, reviewThreadsResponse(false, "", []map[string]any{
+				reviewThreadResponse("PRRT_2", false, true, nil, nil, 12, 10, reviewCommentsResponse(false, "", []map[string]any{
+					reviewCommentResponse("PRRC_3", "outdated location", "2026-06-01T14:10:00Z"),
+				})),
+			}))
+		default:
 			t.Fatalf("unexpected graphql query: %s", req.Query)
 		}
-		if req.Variables["last"] != float64(100) && req.Variables["last"] != 100 {
-			t.Fatalf("last = %#v, want 100", req.Variables["last"])
-		}
-		writeJSON(t, w, map[string]any{
-			"data": map[string]any{
-				"repository": map[string]any{
-					"pullRequest": map[string]any{
-						"reviewThreads": map[string]any{
-							"nodes": []map[string]any{
-								{
-									"id":         "PRRT_1",
-									"isResolved": false,
-									"isOutdated": true,
-									"path":       "internal/app/app.go",
-									"line":       42,
-									"startLine":  40,
-									"diffSide":   "RIGHT",
-									"comments": map[string]any{
-										"nodes": []map[string]any{
-											{
-												"id":        "PRRC_1",
-												"author":    map[string]any{"login": "reviewer"},
-												"bodyText":  "please update this",
-												"url":       "https://github.com/octo-org/prdash/pull/12#discussion_r1",
-												"createdAt": "2026-06-01T14:00:00Z",
-												"updatedAt": "2026-06-01T14:05:00Z",
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		})
 	}))
 	defer server.Close()
 
@@ -556,15 +552,68 @@ func TestPullRequestReviewThreads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(threads) != 1 {
-		t.Fatalf("len(threads) = %d, want 1", len(threads))
+	if requests != 3 {
+		t.Fatalf("requests = %d, want 3", requests)
+	}
+	if len(threads) != 2 {
+		t.Fatalf("len(threads) = %d, want 2", len(threads))
 	}
 	thread := threads[0]
-	if thread.ID != "PRRT_1" || thread.IsResolved || !thread.IsOutdated || thread.Path != "internal/app/app.go" || thread.Line != 42 {
+	if thread.ID != "PRRT_1" || thread.IsResolved || thread.IsOutdated || thread.Path != "internal/app/app.go" || thread.Line == nil || *thread.Line != 42 {
 		t.Fatalf("unexpected review thread: %+v", thread)
 	}
-	if len(thread.Comments) != 1 || thread.Comments[0].Author != "reviewer" || thread.Comments[0].BodyText != "please update this" {
+	if thread.OriginalStartLine == nil || *thread.OriginalStartLine != 39 || thread.StartDiffSide != "LEFT" {
+		t.Fatalf("missing original review location: %+v", thread)
+	}
+	if len(thread.Comments) != 2 || thread.Comments[0].BodyText != "please update this" || thread.Comments[1].BodyText != "follow-up" {
 		t.Fatalf("unexpected review comments: %+v", thread.Comments)
+	}
+	outdated := threads[1]
+	if !outdated.IsOutdated || outdated.Line != nil || outdated.OriginalLine == nil || *outdated.OriginalLine != 12 {
+		t.Fatalf("unexpected outdated review location: %+v", outdated)
+	}
+}
+
+func reviewThreadsResponse(hasNextPage bool, endCursor string, nodes []map[string]any) map[string]any {
+	return map[string]any{"data": map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
+		"reviewThreads": map[string]any{
+			"pageInfo": map[string]any{"hasNextPage": hasNextPage, "endCursor": endCursor},
+			"nodes":    nodes,
+		},
+	}}}}
+}
+
+func reviewThreadResponse(id string, resolved, outdated bool, line, startLine, originalLine, originalStartLine any, comments map[string]any) map[string]any {
+	return map[string]any{
+		"id":                id,
+		"isResolved":        resolved,
+		"isOutdated":        outdated,
+		"path":              "internal/app/app.go",
+		"line":              line,
+		"startLine":         startLine,
+		"originalLine":      originalLine,
+		"originalStartLine": originalStartLine,
+		"diffSide":          "RIGHT",
+		"startDiffSide":     "LEFT",
+		"comments":          comments,
+	}
+}
+
+func reviewCommentsResponse(hasNextPage bool, endCursor string, nodes []map[string]any) map[string]any {
+	return map[string]any{
+		"pageInfo": map[string]any{"hasNextPage": hasNextPage, "endCursor": endCursor},
+		"nodes":    nodes,
+	}
+}
+
+func reviewCommentResponse(id, body, createdAt string) map[string]any {
+	return map[string]any{
+		"id":        id,
+		"author":    map[string]any{"login": "reviewer"},
+		"bodyText":  body,
+		"url":       "https://github.com/octo-org/prdash/pull/12#discussion_" + id,
+		"createdAt": createdAt,
+		"updatedAt": createdAt,
 	}
 }
 

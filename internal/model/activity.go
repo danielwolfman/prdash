@@ -21,14 +21,17 @@ type PullRequestActivity struct {
 }
 
 type PullRequestReviewThread struct {
-	ID         string
-	IsResolved bool
-	IsOutdated bool
-	Path       string
-	Line       int
-	StartLine  int
-	DiffSide   string
-	Comments   []PullRequestReviewComment
+	ID                string
+	IsResolved        bool
+	IsOutdated        bool
+	Path              string
+	Line              *int
+	StartLine         *int
+	OriginalLine      *int
+	OriginalStartLine *int
+	DiffSide          string
+	StartDiffSide     string
+	Comments          []PullRequestReviewComment
 }
 
 type PullRequestReviewComment struct {

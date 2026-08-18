@@ -51,7 +51,7 @@ func New() *cobra.Command {
 				Symbols:        "auto",
 				Animations:     true,
 				AnimationFPS:   6,
-				Loader:         dashboardLoader(configPath, limitOverride, logger),
+				Loader:         dashboardLoader(configPath, limitOverride, logger, false),
 				ActionExecutor: actionExecutor(configPath, allowRerun, logger),
 				ActionsEnabled: actionsEnabled(configPath, allowRerun),
 				OpenURL:        openURL,
@@ -90,7 +90,7 @@ func watchCommand(configPath *string) *cobra.Command {
 				"version": Version,
 				"commit":  Commit,
 			})
-			return runWatch(cmd.Context(), dashboardLoader(*configPath, limitOverride, logger))
+			return runWatch(cmd.Context(), dashboardLoader(*configPath, limitOverride, logger, true))
 		},
 	}
 	cmd.Flags().IntVar(&limitOverride, "limit", 0, "override max visible PRs for this run")
@@ -272,7 +272,7 @@ func actionExecutor(configPath string, flagEnabled bool, logger *logpkg.Logger) 
 	}
 }
 
-func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger) tui.Loader {
+func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger, hooksRequired bool) tui.Loader {
 	return func(ctx context.Context, refresh <-chan struct{}, events chan<- tui.LoadEvent) {
 		path, err := config.ResolvePath(configPath)
 		if err != nil {
@@ -304,10 +304,23 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 			"hooks_enabled":    cfg.Hooks.Enabled,
 			"hook_commands":    len(cfg.Hooks.Commands),
 		})
-		hookDispatcher, err := hooks.NewDispatcher(cfg, logger)
+		hookDispatcher, err := hookDispatcherForMode(cfg, logger, hooksRequired)
 		if err != nil {
 			events <- tui.LoadEvent{Error: err.Error(), Done: true}
 			return
+		}
+		hookStatus := ""
+		if hookDispatcher == nil {
+			logger.Warn("hooks_owned_by_another_process", map[string]any{"state_path": cfg.Hooks.StatePath})
+			hookStatus = " · hooks handled by another prdash process"
+			events <- tui.LoadEvent{Message: strings.TrimPrefix(hookStatus, " · ")}
+		}
+		if hookDispatcher != nil {
+			defer func() {
+				if err := hookDispatcher.Close(); err != nil {
+					logger.Warn("hook_state_unlock_error", map[string]any{"error": err.Error()})
+				}
+			}()
 		}
 
 		events <- tui.LoadEvent{Message: "checking GitHub CLI auth"}
@@ -336,9 +349,16 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 			searchLimit = 100
 		}
 		includeAuthors := authorFiltersFromConfig(cfg)
-		refreshInterval := calculateRefreshInterval(cfg, cfg.Limits.MaxVisiblePRs)
+		hookRequestsPerRow := 0
+		if hookDispatcher.WantsPullRequestActivity() {
+			hookRequestsPerRow++
+		}
+		if hookDispatcher.WantsReviewThreads() {
+			hookRequestsPerRow++
+		}
+		refreshInterval := calculateRefreshInterval(cfg, cfg.Limits.MaxVisiblePRs, hookRequestsPerRow)
 		for {
-			events <- tui.LoadEvent{User: status.Account, Message: fmt.Sprintf("discovering up to %d monitored PRs", cfg.Limits.MaxVisiblePRs), SnapshotAt: time.Now()}
+			events <- tui.LoadEvent{User: status.Account, Message: fmt.Sprintf("discovering up to %d monitored PRs%s", cfg.Limits.MaxVisiblePRs, hookStatus), SnapshotAt: time.Now()}
 			cycleStart := time.Now()
 			prs, err := client.SearchAuthoredOpenPRs(ctx, searchLimit, cfg.Filters.IncludeOwners, includeAuthors)
 			if err != nil {
@@ -366,21 +386,21 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 				return client.PullRequest(ctx, pr.RepoFullName, pr.Number)
 			})
 			rows, excluded := prepareRows(prs, cfg)
-			refreshInterval = calculateRefreshInterval(cfg, len(rows))
+			refreshInterval = calculateRefreshInterval(cfg, len(rows), hookRequestsPerRow)
 			logger.Info("loader_discovered_prs", map[string]any{
 				"discovered":         len(prs),
 				"visible":            len(rows),
 				"excluded":           excluded,
 				"refresh_interval":   refreshInterval.String(),
 				"search_limit":       searchLimit,
-				"estimated_requests": estimateRefreshRequests(len(rows)),
+				"estimated_requests": estimateRefreshRequests(len(rows), hookRequestsPerRow),
 			})
 			events <- tui.LoadEvent{
 				TotalDiscovered: len(prs),
 				ExcludedCount:   excluded,
 				Rows:            rows,
 				ReplaceRows:     true,
-				Message:         fmt.Sprintf("refreshing jobs for %d PRs", len(rows)),
+				Message:         fmt.Sprintf("refreshing jobs for %d PRs%s", len(rows), hookStatus),
 				RefreshInterval: refreshInterval,
 				SnapshotAt:      time.Now(),
 			}
@@ -398,7 +418,7 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 				ExcludedCount:   excluded,
 				SnapshotAt:      time.Now(),
 				RefreshInterval: refreshInterval,
-				Message:         fmt.Sprintf("loaded %d PRs", len(rows)),
+				Message:         fmt.Sprintf("loaded %d PRs%s", len(rows), hookStatus),
 			}
 			logger.Info("loader_cycle_complete", map[string]any{
 				"visible":     len(rows),
@@ -417,6 +437,17 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 			}
 		}
 	}
+}
+
+func hookDispatcherForMode(cfg config.Config, logger *logpkg.Logger, hooksRequired bool) (*hooks.Dispatcher, error) {
+	dispatcher, err := hooks.NewDispatcher(cfg, logger)
+	if err != nil && !hooksRequired && errors.Is(err, hooks.ErrStateLocked) {
+		return nil, nil
+	}
+	if err != nil && hooksRequired && errors.Is(err, hooks.ErrStateLocked) {
+		return nil, fmt.Errorf("%w; stop the current prdash process before starting watch", err)
+	}
+	return dispatcher, err
 }
 
 func prepareRows(prs []model.PullRequest, cfg config.Config) ([]tui.Row, int) {
@@ -557,7 +588,7 @@ func maxInt(a, b int) int {
 	return b
 }
 
-func calculateRefreshInterval(cfg config.Config, visibleRows int) time.Duration {
+func calculateRefreshInterval(cfg config.Config, visibleRows, hookRequestsPerRow int) time.Duration {
 	minSeconds := cfg.Limits.MinRefreshIntervalSecond
 	if minSeconds <= 0 {
 		minSeconds = 30
@@ -571,7 +602,7 @@ func calculateRefreshInterval(cfg config.Config, visibleRows int) time.Duration 
 		budgetPercent = 60
 	}
 
-	estimatedRequests := estimateRefreshRequests(visibleRows)
+	estimatedRequests := estimateRefreshRequests(visibleRows, hookRequestsPerRow)
 	allowedPerHour := 5000 * budgetPercent / 100
 	calculatedSeconds := estimatedRequests * 3600 / maxInt(1, allowedPerHour)
 	if calculatedSeconds < minSeconds {
@@ -583,14 +614,16 @@ func calculateRefreshInterval(cfg config.Config, visibleRows int) time.Duration 
 	return time.Duration(calculatedSeconds) * time.Second
 }
 
-func estimateRefreshRequests(visibleRows int) int {
+func estimateRefreshRequests(visibleRows, hookRequestsPerRow int) int {
 	if visibleRows <= 0 {
 		return 2
 	}
-	// Each row needs one run-list request plus one or more job-list pages. Large
-	// matrix workflows commonly spill past GitHub's 100-job page size. Hooked
-	// PR activity adds one GraphQL request per row when configured.
-	return 2 + visibleRows*6
+	if hookRequestsPerRow < 0 {
+		hookRequestsPerRow = 0
+	}
+	// Each row needs one run-list request plus an allowance for paginated job
+	// lists. Enabled activity and review-thread hooks each add a GraphQL request.
+	return 2 + visibleRows*(5+hookRequestsPerRow)
 }
 
 func waitForRefresh(ctx context.Context, refresh <-chan struct{}, d time.Duration) (bool, error) {
