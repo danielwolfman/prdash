@@ -29,6 +29,7 @@ type Model struct {
 	loading    bool
 	loadText   string
 	loadError  string
+	fatalError string
 	confirm    *confirmation
 	actionBusy bool
 	actionText string
@@ -166,6 +167,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case LoadEvent:
 		m.applyLoadEvent(msg)
+		if msg.Fatal {
+			return m, tea.Quit
+		}
 		if !msg.Closed {
 			return m, m.waitForLoadEvent()
 		}
@@ -708,6 +712,10 @@ func (m Model) waitForLoadEvent() tea.Cmd {
 	}
 }
 
+func (m Model) FatalError() string {
+	return m.fatalError
+}
+
 func (m *Model) applyLoadEvent(event LoadEvent) {
 	if !event.Closed && event.Error == "" && (event.Message != "" || event.Row != nil || event.ReplaceRows) {
 		m.loadError = ""
@@ -757,6 +765,9 @@ func (m *Model) applyLoadEvent(event LoadEvent) {
 	if event.Error != "" {
 		m.loadError = event.Error
 		m.loading = false
+	}
+	if event.Fatal {
+		m.fatalError = event.Error
 	}
 	if event.Done {
 		m.loading = false

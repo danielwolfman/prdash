@@ -58,7 +58,7 @@ prdash watch
 prdash watch --limit 10
 ```
 
-Only one process owns hook dispatch for a state file. If headless watch is already running, the TUI still opens but reports that hooks are handled by another `prdash` process. If the TUI owns hooks first, `prdash watch` exits with a clear ownership error; close the TUI, start watch, and then reopen the TUI for display-only monitoring. Operating-system file locks are released automatically when the owner exits or crashes.
+Only one monitoring process can use a hook state file at a time, even when hooks are disabled. If either the TUI or headless watch is already running, starting the other exits with a clear ownership error. Stop the running process before switching modes. Operating-system file locks are released automatically when the owner exits or crashes.
 
 ## PR Event Hooks
 

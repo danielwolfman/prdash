@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -95,23 +94,33 @@ func TestRunWatchStopsCleanlyWhenCancelled(t *testing.T) {
 	}
 }
 
-func TestHookDispatcherForModeFallsBackOnlyForTUI(t *testing.T) {
+func TestDashboardLoaderReportsLockedMonitorAsFatal(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.toml")
 	cfg := config.Default()
-	cfg.Hooks.Enabled = true
-	cfg.Hooks.StatePath = filepath.Join(t.TempDir(), "hooks-state.json")
-	cfg.Hooks.Commands = []config.HookCommandConfig{{Event: hooks.EventReviewThreadChanged, Command: []string{"hook"}}}
+	cfg.Hooks.StatePath = filepath.Join(directory, "hooks-state.json")
+	cfg.Logging.Enabled = false
+	cfg.Logging.Path = filepath.Join(directory, "prdash.log")
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
 	owner, err := hooks.NewDispatcher(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer owner.Close()
-
-	tuiDispatcher, err := hookDispatcherForMode(cfg, nil, false)
-	if err != nil || tuiDispatcher != nil {
-		t.Fatalf("TUI dispatcher = %#v, error = %v, want display-only fallback", tuiDispatcher, err)
+	t.Cleanup(func() { _ = owner.Close() })
+	logger, err := logpkg.New(cfg.Logging)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := hookDispatcherForMode(cfg, nil, true); !errors.Is(err, hooks.ErrStateLocked) {
-		t.Fatalf("headless error = %v, want %v", err, hooks.ErrStateLocked)
+
+	events := make(chan tui.LoadEvent, 2)
+	dashboardLoader(configPath, 0, logger)(context.Background(), nil, events)
+	<-events
+	fatal := <-events
+	if !fatal.Fatal || fatal.Error == "" {
+		t.Fatalf("event = %#v, want fatal ownership error", fatal)
 	}
 }
 

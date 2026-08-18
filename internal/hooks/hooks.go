@@ -39,7 +39,7 @@ const (
 	maxConcurrentHookCommands = 4
 )
 
-var ErrStateLocked = errors.New("hook state is owned by another prdash process")
+var ErrStateLocked = errors.New("another prdash monitor is already running")
 
 type Logger interface {
 	Info(string, map[string]any)
@@ -257,19 +257,19 @@ func NewDispatcher(cfg config.Config, logger Logger) (*Dispatcher, error) {
 		},
 		discovered: map[string]struct{}{},
 	}
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		return nil, err
+	}
+	stateLock := flock.New(statePath + ".lock")
+	locked, err := stateLock.TryLock()
+	if err != nil {
+		return nil, fmt.Errorf("lock prdash monitor: %w", err)
+	}
+	if !locked {
+		return nil, fmt.Errorf("%w; stop it before starting another: %s", ErrStateLocked, statePath)
+	}
+	dispatcher.stateLock = stateLock
 	if dispatcher.enabled {
-		if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
-			return nil, err
-		}
-		stateLock := flock.New(statePath + ".lock")
-		locked, err := stateLock.TryLock()
-		if err != nil {
-			return nil, fmt.Errorf("lock hook state: %w", err)
-		}
-		if !locked {
-			return nil, fmt.Errorf("%w: %s", ErrStateLocked, statePath)
-		}
-		dispatcher.stateLock = stateLock
 		if err := dispatcher.loadState(); err != nil {
 			_ = stateLock.Close()
 			return nil, err

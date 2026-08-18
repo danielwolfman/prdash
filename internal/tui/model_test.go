@@ -156,6 +156,23 @@ func TestLoadErrorKeepsListeningAndRendersFooterError(t *testing.T) {
 	}
 }
 
+func TestFatalLoadErrorQuits(t *testing.T) {
+	m := New(Dashboard{Animations: false})
+
+	updated, cmd := m.Update(LoadEvent{Error: "another prdash monitor is already running", Done: true, Fatal: true})
+	m = updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("fatal load error should quit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatal("fatal load error command should return tea.QuitMsg")
+	}
+	if m.FatalError() != "another prdash monitor is already running" {
+		t.Fatalf("fatal error = %q", m.FatalError())
+	}
+}
+
 func TestFullyGreenRowGetsGreenBox(t *testing.T) {
 	now := time.Date(2026, 6, 1, 15, 0, 0, 0, time.UTC)
 	m := New(Dashboard{SnapshotAt: now, Animations: false})

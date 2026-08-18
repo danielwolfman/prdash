@@ -51,14 +51,22 @@ func New() *cobra.Command {
 				Symbols:        "auto",
 				Animations:     true,
 				AnimationFPS:   6,
-				Loader:         dashboardLoader(configPath, limitOverride, logger, false),
+				Loader:         dashboardLoader(configPath, limitOverride, logger),
 				ActionExecutor: actionExecutor(configPath, allowRerun, logger),
 				ActionsEnabled: actionsEnabled(configPath, allowRerun),
 				OpenURL:        openURL,
 			}
 			program := tea.NewProgram(tui.New(dashboard), tea.WithAltScreen(), tea.WithMouseCellMotion())
-			_, err = program.Run()
-			return err
+			finalModel, err := program.Run()
+			if err != nil {
+				return err
+			}
+			if dashboardModel, ok := finalModel.(tui.Model); ok {
+				if fatalError := dashboardModel.FatalError(); fatalError != "" {
+					return errors.New(fatalError)
+				}
+			}
+			return nil
 		},
 	}
 	root.PersistentFlags().StringVar(&configPath, "config", "", "config file path")
@@ -90,7 +98,7 @@ func watchCommand(configPath *string) *cobra.Command {
 				"version": Version,
 				"commit":  Commit,
 			})
-			return runWatch(cmd.Context(), dashboardLoader(*configPath, limitOverride, logger, true))
+			return runWatch(cmd.Context(), dashboardLoader(*configPath, limitOverride, logger))
 		},
 	}
 	cmd.Flags().IntVar(&limitOverride, "limit", 0, "override max visible PRs for this run")
@@ -272,7 +280,7 @@ func actionExecutor(configPath string, flagEnabled bool, logger *logpkg.Logger) 
 	}
 }
 
-func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger, hooksRequired bool) tui.Loader {
+func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger) tui.Loader {
 	return func(ctx context.Context, refresh <-chan struct{}, events chan<- tui.LoadEvent) {
 		path, err := config.ResolvePath(configPath)
 		if err != nil {
@@ -304,24 +312,16 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 			"hooks_enabled":    cfg.Hooks.Enabled,
 			"hook_commands":    len(cfg.Hooks.Commands),
 		})
-		hookDispatcher, err := hookDispatcherForMode(cfg, logger, hooksRequired)
+		hookDispatcher, err := hooks.NewDispatcher(cfg, logger)
 		if err != nil {
-			events <- tui.LoadEvent{Error: err.Error(), Done: true}
+			events <- tui.LoadEvent{Error: err.Error(), Done: true, Fatal: errors.Is(err, hooks.ErrStateLocked)}
 			return
 		}
-		hookStatus := ""
-		if hookDispatcher == nil {
-			logger.Warn("hooks_owned_by_another_process", map[string]any{"state_path": cfg.Hooks.StatePath})
-			hookStatus = " · hooks handled by another prdash process"
-			events <- tui.LoadEvent{Message: strings.TrimPrefix(hookStatus, " · ")}
-		}
-		if hookDispatcher != nil {
-			defer func() {
-				if err := hookDispatcher.Close(); err != nil {
-					logger.Warn("hook_state_unlock_error", map[string]any{"error": err.Error()})
-				}
-			}()
-		}
+		defer func() {
+			if err := hookDispatcher.Close(); err != nil {
+				logger.Warn("hook_state_unlock_error", map[string]any{"error": err.Error()})
+			}
+		}()
 
 		events <- tui.LoadEvent{Message: "checking GitHub CLI auth"}
 		status, err := auth.Status(ctx, cfg.GitHub.Host)
@@ -358,7 +358,7 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 		}
 		refreshInterval := calculateRefreshInterval(cfg, cfg.Limits.MaxVisiblePRs, hookRequestsPerRow)
 		for {
-			events <- tui.LoadEvent{User: status.Account, Message: fmt.Sprintf("discovering up to %d monitored PRs%s", cfg.Limits.MaxVisiblePRs, hookStatus), SnapshotAt: time.Now()}
+			events <- tui.LoadEvent{User: status.Account, Message: fmt.Sprintf("discovering up to %d monitored PRs", cfg.Limits.MaxVisiblePRs), SnapshotAt: time.Now()}
 			cycleStart := time.Now()
 			prs, err := client.SearchAuthoredOpenPRs(ctx, searchLimit, cfg.Filters.IncludeOwners, includeAuthors)
 			if err != nil {
@@ -400,7 +400,7 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 				ExcludedCount:   excluded,
 				Rows:            rows,
 				ReplaceRows:     true,
-				Message:         fmt.Sprintf("refreshing jobs for %d PRs%s", len(rows), hookStatus),
+				Message:         fmt.Sprintf("refreshing jobs for %d PRs", len(rows)),
 				RefreshInterval: refreshInterval,
 				SnapshotAt:      time.Now(),
 			}
@@ -418,7 +418,7 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 				ExcludedCount:   excluded,
 				SnapshotAt:      time.Now(),
 				RefreshInterval: refreshInterval,
-				Message:         fmt.Sprintf("loaded %d PRs%s", len(rows), hookStatus),
+				Message:         fmt.Sprintf("loaded %d PRs", len(rows)),
 			}
 			logger.Info("loader_cycle_complete", map[string]any{
 				"visible":     len(rows),
@@ -437,17 +437,6 @@ func dashboardLoader(configPath string, limitOverride int, logger *logpkg.Logger
 			}
 		}
 	}
-}
-
-func hookDispatcherForMode(cfg config.Config, logger *logpkg.Logger, hooksRequired bool) (*hooks.Dispatcher, error) {
-	dispatcher, err := hooks.NewDispatcher(cfg, logger)
-	if err != nil && !hooksRequired && errors.Is(err, hooks.ErrStateLocked) {
-		return nil, nil
-	}
-	if err != nil && hooksRequired && errors.Is(err, hooks.ErrStateLocked) {
-		return nil, fmt.Errorf("%w; stop the current prdash process before starting watch", err)
-	}
-	return dispatcher, err
 }
 
 func prepareRows(prs []model.PullRequest, cfg config.Config) ([]tui.Row, int) {

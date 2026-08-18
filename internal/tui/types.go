@@ -44,6 +44,7 @@ type LoadEvent struct {
 	Row             *Row
 	Done            bool
 	Closed          bool
+	Fatal           bool
 	Error           string
 	Message         string
 	SnapshotAt      time.Time

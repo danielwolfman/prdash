@@ -492,11 +492,9 @@ func TestDispatcherPersistsReviewThreadStateAcrossRestarts(t *testing.T) {
 	thirdCalls.assertNoMore(t)
 }
 
-func TestDispatcherAllowsOnlyOneStateOwner(t *testing.T) {
+func TestDispatcherAllowsOnlyOneMonitorWhenHooksAreDisabled(t *testing.T) {
 	cfg := config.Default()
-	cfg.Hooks.Enabled = true
 	cfg.Hooks.StatePath = filepath.Join(t.TempDir(), "hooks-state.json")
-	cfg.Hooks.Commands = []config.HookCommandConfig{{Event: EventReviewThreadChanged, Command: []string{"hook"}}}
 
 	first, err := NewDispatcher(cfg, nil)
 	if err != nil {
