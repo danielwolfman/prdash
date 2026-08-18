@@ -376,6 +376,74 @@ func TestDispatcherBaselinesThenFiresNewPRActivity(t *testing.T) {
 	calls.assertNoMore(t)
 }
 
+func TestDispatcherEmitsNewOrChangedUnresolvedReviewThreads(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	initial := model.PullRequestReviewThread{
+		ID:       "PRRT_1",
+		Path:     "internal/app/app.go",
+		Line:     42,
+		DiffSide: "RIGHT",
+		Comments: []model.PullRequestReviewComment{
+			{
+				ID:        "PRRC_1",
+				Author:    "reviewer",
+				URL:       "https://github.com/octo-org/prdash/pull/7#discussion_r1",
+				BodyText:  "existing comment",
+				CreatedAt: time.Date(2026, 6, 8, 8, 0, 0, 0, time.UTC),
+				UpdatedAt: time.Date(2026, 6, 8, 8, 0, 0, 0, time.UTC),
+			},
+		},
+	}
+
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{initial})
+	initialCall := calls.collect(t, 1)[0]
+	if initialCall.ReviewThread == nil || initialCall.ReviewThread.ID != "PRRT_1" {
+		t.Fatalf("initial review thread payload = %#v", initialCall.ReviewThread)
+	}
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{initial})
+	calls.assertNoMore(t)
+
+	changed := initial
+	changed.Comments = append([]model.PullRequestReviewComment(nil), initial.Comments...)
+	changed.Comments[0].BodyText = "edited comment"
+	changed.Comments[0].UpdatedAt = time.Date(2026, 6, 8, 8, 5, 0, 0, time.UTC)
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{changed})
+
+	changedCall := calls.collect(t, 1)[0]
+	if changedCall.Event != EventReviewThreadChanged {
+		t.Fatalf("event = %q, want %q", changedCall.Event, EventReviewThreadChanged)
+	}
+	if changedCall.ReviewThread == nil || changedCall.ReviewThread.ID != "PRRT_1" || changedCall.ReviewThread.IsResolved {
+		t.Fatalf("review thread payload = %#v", changedCall.ReviewThread)
+	}
+	if len(changedCall.ReviewThread.Comments) != 1 || changedCall.ReviewThread.Comments[0].BodyText != "edited comment" {
+		t.Fatalf("review comments = %#v", changedCall.ReviewThread.Comments)
+	}
+
+	resolved := changed
+	resolved.IsResolved = true
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{resolved})
+	calls.assertNoMore(t)
+
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{changed})
+	reopenedCall := calls.collect(t, 1)[0]
+	if reopenedCall.ReviewThread == nil || reopenedCall.ReviewThread.IsResolved {
+		t.Fatalf("reopened review thread payload = %#v", reopenedCall.ReviewThread)
+	}
+
+	newThread := initial
+	newThread.ID = "PRRT_2"
+	newThread.Comments = append([]model.PullRequestReviewComment(nil), initial.Comments...)
+	newThread.Comments[0].ID = "PRRC_2"
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{changed, newThread})
+	newCall := calls.collect(t, 1)[0]
+	if newCall.ReviewThread == nil || newCall.ReviewThread.ID != "PRRT_2" {
+		t.Fatalf("new review thread payload = %#v", newCall.ReviewThread)
+	}
+	calls.assertNoMore(t)
+}
+
 func TestDispatcherBaselinesThenFiresNewPRLifecycle(t *testing.T) {
 	dispatcher, calls := testDispatcher(t)
 	pr := testPR()
@@ -632,6 +700,7 @@ func testDispatcher(t *testing.T) (*Dispatcher, payloadCollector) {
 		{Event: EventStackRebaseRequired, Command: []string{"hook"}},
 		{Event: EventChecksCompleted, Command: []string{"hook"}},
 		{Event: EventNewPRActivity, Command: []string{"hook"}},
+		{Event: EventReviewThreadChanged, Command: []string{"hook"}},
 		{Event: EventNewPRByAuthor, Command: []string{"hook"}},
 		{Event: EventPRReadyForReview, Command: []string{"hook"}},
 		{Event: EventPRClosed, Command: []string{"hook"}},

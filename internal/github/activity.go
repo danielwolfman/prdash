@@ -40,6 +40,37 @@ query PullRequestActivities($owner: String!, $repo: String!, $number: Int!, $las
   }
 }`
 
+const pullRequestReviewThreadsQuery = `
+query PullRequestReviewThreads($owner: String!, $repo: String!, $number: Int!, $last: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(last: $last) {
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          startLine
+          diffSide
+          comments(last: $last) {
+            nodes {
+              id
+              author {
+                login
+              }
+              bodyText
+              url
+              createdAt
+              updatedAt
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+
 func (c *Client) PullRequestActivities(ctx context.Context, pr model.PullRequest, last int) ([]model.PullRequestActivity, error) {
 	if last <= 0 {
 		last = 20
@@ -87,6 +118,50 @@ func (c *Client) PullRequestActivities(ctx context.Context, pr model.PullRequest
 	return activities, nil
 }
 
+func (c *Client) PullRequestReviewThreads(ctx context.Context, pr model.PullRequest, last int) ([]model.PullRequestReviewThread, error) {
+	if last <= 0 {
+		last = 100
+	}
+	var response pullRequestReviewThreadsResponse
+	if err := c.graphql(ctx, pullRequestReviewThreadsQuery, map[string]any{
+		"owner":  pr.Owner,
+		"repo":   pr.Repo,
+		"number": pr.Number,
+		"last":   last,
+	}, &response); err != nil {
+		return nil, err
+	}
+
+	threads := make([]model.PullRequestReviewThread, 0, len(response.Repository.PullRequest.ReviewThreads.Nodes))
+	for _, thread := range response.Repository.PullRequest.ReviewThreads.Nodes {
+		comments := make([]model.PullRequestReviewComment, 0, len(thread.Comments.Nodes))
+		for _, comment := range thread.Comments.Nodes {
+			comments = append(comments, model.PullRequestReviewComment{
+				ID:        comment.ID,
+				Author:    comment.Author.Login,
+				URL:       comment.URL,
+				BodyText:  comment.BodyText,
+				CreatedAt: comment.CreatedAt.Time,
+				UpdatedAt: comment.UpdatedAt.Time,
+			})
+		}
+		threads = append(threads, model.PullRequestReviewThread{
+			ID:         thread.ID,
+			IsResolved: thread.IsResolved,
+			IsOutdated: thread.IsOutdated,
+			Path:       thread.Path,
+			Line:       thread.Line,
+			StartLine:  thread.StartLine,
+			DiffSide:   thread.DiffSide,
+			Comments:   comments,
+		})
+	}
+	sort.Slice(threads, func(i, j int) bool {
+		return threads[i].ID < threads[j].ID
+	})
+	return threads, nil
+}
+
 type pullRequestActivitiesResponse struct {
 	Repository struct {
 		PullRequest struct {
@@ -115,6 +190,36 @@ type pullRequestActivitiesResponse struct {
 					UpdatedAt githubTime `json:"updatedAt"`
 				} `json:"nodes"`
 			} `json:"reviews"`
+		} `json:"pullRequest"`
+	} `json:"repository"`
+}
+
+type pullRequestReviewThreadsResponse struct {
+	Repository struct {
+		PullRequest struct {
+			ReviewThreads struct {
+				Nodes []struct {
+					ID         string `json:"id"`
+					IsResolved bool   `json:"isResolved"`
+					IsOutdated bool   `json:"isOutdated"`
+					Path       string `json:"path"`
+					Line       int    `json:"line"`
+					StartLine  int    `json:"startLine"`
+					DiffSide   string `json:"diffSide"`
+					Comments   struct {
+						Nodes []struct {
+							ID     string `json:"id"`
+							Author struct {
+								Login string `json:"login"`
+							} `json:"author"`
+							BodyText  string     `json:"bodyText"`
+							URL       string     `json:"url"`
+							CreatedAt githubTime `json:"createdAt"`
+							UpdatedAt githubTime `json:"updatedAt"`
+						} `json:"nodes"`
+					} `json:"comments"`
+				} `json:"nodes"`
+			} `json:"reviewThreads"`
 		} `json:"pullRequest"`
 	} `json:"repository"`
 }

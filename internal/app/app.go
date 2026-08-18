@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -70,8 +71,49 @@ func New() *cobra.Command {
 	root.AddCommand(doctorCommand(&configPath))
 	root.AddCommand(logsCommand(&configPath))
 	root.AddCommand(versionCommand())
+	root.AddCommand(watchCommand(&configPath))
 
 	return root
+}
+
+func watchCommand(configPath *string) *cobra.Command {
+	var limitOverride int
+	cmd := &cobra.Command{
+		Use:   "watch",
+		Short: "Monitor PRs and dispatch hooks without the terminal UI",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			logger, err := loggerForConfig(*configPath)
+			if err != nil {
+				return err
+			}
+			logger.Info("prdash_watch_start", map[string]any{
+				"version": Version,
+				"commit":  Commit,
+			})
+			return runWatch(cmd.Context(), dashboardLoader(*configPath, limitOverride, logger))
+		},
+	}
+	cmd.Flags().IntVar(&limitOverride, "limit", 0, "override max visible PRs for this run")
+	return cmd
+}
+
+func runWatch(ctx context.Context, loader tui.Loader) error {
+	events := make(chan tui.LoadEvent)
+	go func() {
+		loader(ctx, nil, events)
+		close(events)
+	}()
+
+	var loadErr error
+	for event := range events {
+		if event.Error != "" {
+			loadErr = errors.New(event.Error)
+		}
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	return loadErr
 }
 
 func loggerForConfig(configPath string) (*logpkg.Logger, error) {
@@ -458,19 +500,18 @@ func streamJobFetches(ctx context.Context, client *ghapi.Client, rows []tui.Row,
 					"duration_ms": time.Since(start).Milliseconds(),
 					"error":       err.Error(),
 				})
-				events <- tui.LoadEvent{Row: &row, TotalDiscovered: totalDiscovered, ExcludedCount: excluded}
-				return
+			} else {
+				row.Runs = runs
+				logger.Info("row_fetch_complete", map[string]any{
+					"repo":        row.PR.RepoFullName,
+					"pr_number":   row.PR.Number,
+					"pr_title":    row.PR.Title,
+					"runs":        len(runs),
+					"jobs":        len(allWorkflowJobs(runs)),
+					"duration_ms": time.Since(start).Milliseconds(),
+				})
+				hookDispatcher.Observe(ctx, row.PR, row.Runs)
 			}
-			row.Runs = runs
-			logger.Info("row_fetch_complete", map[string]any{
-				"repo":        row.PR.RepoFullName,
-				"pr_number":   row.PR.Number,
-				"pr_title":    row.PR.Title,
-				"runs":        len(runs),
-				"jobs":        len(allWorkflowJobs(runs)),
-				"duration_ms": time.Since(start).Milliseconds(),
-			})
-			hookDispatcher.Observe(ctx, row.PR, row.Runs)
 			if hookDispatcher.WantsPullRequestActivity() {
 				activities, err := client.PullRequestActivities(ctx, row.PR, 20)
 				if err != nil {
@@ -481,6 +522,18 @@ func streamJobFetches(ctx context.Context, client *ghapi.Client, rows []tui.Row,
 					})
 				} else {
 					hookDispatcher.ObserveActivities(ctx, row.PR, activities)
+				}
+			}
+			if hookDispatcher.WantsReviewThreads() {
+				threads, err := client.PullRequestReviewThreads(ctx, row.PR, 100)
+				if err != nil {
+					logger.Warn("pr_review_threads_fetch_error", map[string]any{
+						"repo":      row.PR.RepoFullName,
+						"pr_number": row.PR.Number,
+						"error":     err.Error(),
+					})
+				} else {
+					hookDispatcher.ObserveReviewThreads(ctx, row.PR, threads)
 				}
 			}
 			events <- tui.LoadEvent{Row: &row, TotalDiscovered: totalDiscovered, ExcludedCount: excluded}

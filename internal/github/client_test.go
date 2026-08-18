@@ -496,6 +496,78 @@ func TestPullRequestActivities(t *testing.T) {
 	}
 }
 
+func TestPullRequestReviewThreads(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/graphql" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req graphqlRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(req.Query, "PullRequestReviewThreads") {
+			t.Fatalf("unexpected graphql query: %s", req.Query)
+		}
+		if req.Variables["last"] != float64(100) && req.Variables["last"] != 100 {
+			t.Fatalf("last = %#v, want 100", req.Variables["last"])
+		}
+		writeJSON(t, w, map[string]any{
+			"data": map[string]any{
+				"repository": map[string]any{
+					"pullRequest": map[string]any{
+						"reviewThreads": map[string]any{
+							"nodes": []map[string]any{
+								{
+									"id":         "PRRT_1",
+									"isResolved": false,
+									"isOutdated": true,
+									"path":       "internal/app/app.go",
+									"line":       42,
+									"startLine":  40,
+									"diffSide":   "RIGHT",
+									"comments": map[string]any{
+										"nodes": []map[string]any{
+											{
+												"id":        "PRRC_1",
+												"author":    map[string]any{"login": "reviewer"},
+												"bodyText":  "please update this",
+												"url":       "https://github.com/octo-org/prdash/pull/12#discussion_r1",
+												"createdAt": "2026-06-01T14:00:00Z",
+												"updatedAt": "2026-06-01T14:05:00Z",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token", WithBaseURLs(server.URL, server.URL+"/graphql"))
+	threads, err := client.PullRequestReviewThreads(context.Background(), model.PullRequest{
+		Owner:  "octo-org",
+		Repo:   "prdash",
+		Number: 12,
+	}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(threads) != 1 {
+		t.Fatalf("len(threads) = %d, want 1", len(threads))
+	}
+	thread := threads[0]
+	if thread.ID != "PRRT_1" || thread.IsResolved || !thread.IsOutdated || thread.Path != "internal/app/app.go" || thread.Line != 42 {
+		t.Fatalf("unexpected review thread: %+v", thread)
+	}
+	if len(thread.Comments) != 1 || thread.Comments[0].Author != "reviewer" || thread.Comments[0].BodyText != "please update this" {
+		t.Fatalf("unexpected review comments: %+v", thread.Comments)
+	}
+}
+
 func TestCurrentWorkflowRunsWithJobsFallsBackToCheckRuns(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

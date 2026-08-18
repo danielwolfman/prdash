@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/danielwolfman/prdash/internal/config"
+	"github.com/danielwolfman/prdash/internal/tui"
 )
 
 func TestCalculateRefreshIntervalClampsToMinimum(t *testing.T) {
@@ -54,6 +55,26 @@ func TestWaitForRefreshWakesBeforeTimer(t *testing.T) {
 	}
 	if !refreshed {
 		t.Fatalf("expected refresh wake")
+	}
+}
+
+func TestRunWatchReturnsLoaderError(t *testing.T) {
+	err := runWatch(context.Background(), func(_ context.Context, _ <-chan struct{}, events chan<- tui.LoadEvent) {
+		events <- tui.LoadEvent{Error: "load failed", Done: true}
+	})
+	if err == nil || err.Error() != "load failed" {
+		t.Fatalf("error = %v, want load failed", err)
+	}
+}
+
+func TestRunWatchStopsCleanlyWhenCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := runWatch(ctx, func(ctx context.Context, _ <-chan struct{}, _ chan<- tui.LoadEvent) {
+		<-ctx.Done()
+	})
+	if err != nil {
+		t.Fatalf("error = %v, want nil", err)
 	}
 }
 
