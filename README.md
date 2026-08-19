@@ -1,6 +1,6 @@
 # prdash
 
-`prdash` is a local terminal dashboard for monitored GitHub pull requests. It shows open PRs authored by the authenticated user plus any configured authors, current-head GitHub Actions jobs, adaptive refresh state, event hooks, and confirmed rerun actions.
+`prdash` is a local monitor for GitHub pull requests with both an interactive terminal dashboard and a headless watch mode. It shows open PRs authored by the authenticated user plus any configured authors, current-head GitHub Actions jobs, adaptive refresh state, event hooks, and confirmed rerun actions.
 
 ![prdash preview](docs/assets/prdash-preview.png)
 
@@ -39,6 +39,7 @@ prdash config rerun enable
 prdash config rerun disable
 prdash logs path
 prdash logs tail --lines 80
+prdash watch
 prdash version
 ```
 
@@ -47,6 +48,17 @@ prdash version
 Debug logs are enabled by default and write to the user cache directory unless `[logging].path` is set. Logs include startup/config state, loader refresh cycles, GitHub request method/status/duration, per-PR job fetch timing, rerun actions, and hot-refresh triggers. Tokens are redacted and PR titles are omitted by default.
 
 Configured authors are searched across included owners by default. Pass one or more `owner/repo` arguments to `prdash config include-author` to restrict that author to specific repositories.
+
+## Headless Watch Mode
+
+Run `prdash watch` to monitor PRs and dispatch configured hooks without opening the terminal UI. It uses the same filters, adaptive refresh intervals, hook state, authentication, and logs as the dashboard, and stops cleanly on `SIGINT` or `SIGTERM`.
+
+```sh
+prdash watch
+prdash watch --limit 10
+```
+
+Only one monitoring process can use a hook state file at a time, even when hooks are disabled. If either the TUI or headless watch is already running, starting the other exits with a clear ownership error. Stop the running process before switching modes. Operating-system file locks are released automatically when the owner exits or crashes.
 
 ## PR Event Hooks
 
@@ -79,6 +91,11 @@ timeout_seconds = 30
 [[hooks.commands]]
 event = "new_pr_comment_or_review"
 command = ["/path/to/pr-activity-hook"]
+timeout_seconds = 60
+
+[[hooks.commands]]
+event = "unresolved_review_thread_changed"
+command = ["/path/to/review-thread-hook"]
 timeout_seconds = 60
 
 [[hooks.commands]]
@@ -116,13 +133,14 @@ Supported events:
 - `stack_rebase_required`: fires when a visible PR in a native GitHub stack has a recorded base SHA that differs from the current tip of its base branch. It can fire again for the same head SHA after the stack layer becomes current and is later made stale again. The PR payload includes `stack_number`, `stack_position`, `stack_size`, `base_sha`, and `stack_needs_rebase`.
 - `checks_completed`: fires when all observed jobs for a visible PR head reach a terminal state, whether the final result is success, failure, cancellation, neutral, or action required. If checks are rerun or replaced and `prdash` observes that head move back to a non-terminal state, it fires again when the new check epoch completes.
 - `new_pr_comment_or_review`: establishes a baseline on first observation, then fires for newly observed top-level PR comments and submitted PR reviews.
+- `unresolved_review_thread_changed`: fires for currently unresolved inline review threads on first observation, then when a thread is created or changed while unresolved, including new or edited comments and threads that become unresolved again. Resolving a thread updates the saved state without firing the hook.
 - `pr_discovered`: fires once per monitored open PR in each `prdash` process, including the initial discovery baseline. This lets idempotent hook consumers ensure external per-PR state after either side restarts or is reinstalled.
 - `new_pr_by_author`: establishes a monitored-PR baseline on first observation, then fires when a new monitored open PR appears in authored/configured-author discovery.
 - `pr_ready_for_review`: fires once per PR head SHA when a monitored PR changes from draft to ready for review.
 - `pr_merged`: fires when a previously observed monitored open PR disappears from open discovery and a direct GitHub lookup verifies it was merged.
 - `pr_closed`: fires when a previously observed monitored open PR disappears from open discovery and a direct GitHub lookup verifies it was closed without merging.
 
-Check and merge-conflict event payloads include PR metadata, a check summary, workflow runs, failed jobs, and `primary_job` for the earliest completed failed job when one exists. Merge-conflict events may have no failed jobs and no `primary_job`; use `pr.merge_state_status` to identify that case. Stack-rebase-required events contain stack metadata and no workflow runs. PR activity payloads include an `activity` object with the activity kind, author, URL, body text, review state, and timestamps. PR lifecycle payloads include PR metadata and no workflow runs.
+Check and merge-conflict event payloads include PR metadata, a check summary, workflow runs, failed jobs, and `primary_job` for the earliest completed failed job when one exists. Merge-conflict events may have no failed jobs and no `primary_job`; use `pr.merge_state_status` to identify that case. Stack-rebase-required events contain stack metadata and no workflow runs. PR activity payloads include an `activity` object with the activity kind, author, URL, body text, review state, and timestamps. Review-thread payloads include a `review_thread` object with nullable current positions, original line/range positions, diff sides, resolution and outdated state, and the complete comment history. PR lifecycle payloads include PR metadata and no workflow runs. Hook commands run with a global concurrency limit of four; additional events wait instead of launching unbounded subprocesses.
 
 Example payload fragment:
 
@@ -241,6 +259,7 @@ make build
 go run ./cmd/prdash
 go run ./cmd/prdash --limit 3
 go run ./cmd/prdash --limit 3 --allow-rerun
+go run ./cmd/prdash watch --limit 3
 ```
 
 The default command opens the TUI immediately, discovers authored open PRs, then fills in current GitHub Actions jobs as background workers complete. It refreshes on a conservative interval derived from the configured rate budget, marks stale rows, and highlights status changes. Press `j`/`k` or arrows to move across PRs and visible jobs, `o` to open the selected PR or job in Chrome/browser, and `q` to quit. Use `--limit 3` for a faster local smoke test.

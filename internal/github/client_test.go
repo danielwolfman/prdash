@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/danielwolfman/prdash/internal/model"
 )
@@ -493,6 +495,168 @@ func TestPullRequestActivities(t *testing.T) {
 	}
 	if activities[1].Kind != model.ActivityPullRequestReview || activities[1].State != "CHANGES_REQUESTED" {
 		t.Fatalf("unexpected second activity: %+v", activities[1])
+	}
+}
+
+func TestPullRequestReviewThreads(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/graphql" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var req graphqlRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		requests++
+		switch {
+		case strings.Contains(req.Query, "PullRequestReviewThreadComments"):
+			if req.Variables["id"] != "PRRT_1" || req.Variables["after"] != "comment-page-1" {
+				t.Fatalf("unexpected comment variables: %#v", req.Variables)
+			}
+			writeJSON(t, w, map[string]any{"data": map[string]any{"node": map[string]any{
+				"comments": reviewCommentsResponse(false, "", []map[string]any{
+					reviewCommentResponse("PRRC_2", "follow-up", "2026-06-01T14:05:00Z", "2026-06-01T14:06:00Z"),
+				}),
+			}}})
+		case strings.Contains(req.Query, "PullRequestReviewThreads"):
+			if req.Variables["first"] != float64(100) && req.Variables["first"] != 100 {
+				t.Fatalf("first = %#v, want 100", req.Variables["first"])
+			}
+			if req.Variables["after"] == nil {
+				writeJSON(t, w, reviewThreadsResponse(true, "thread-page-1", []map[string]any{
+					reviewThreadResponse("PRRT_1", false, false, 42, 40, 41, 39, reviewCommentsResponse(true, "comment-page-1", []map[string]any{
+						reviewCommentResponse("PRRC_1", "please update this", "2026-06-01T14:00:00Z", "2026-06-01T14:01:00Z"),
+					})),
+				}))
+				return
+			}
+			if req.Variables["after"] != "thread-page-1" {
+				t.Fatalf("unexpected thread cursor: %#v", req.Variables["after"])
+			}
+			writeJSON(t, w, reviewThreadsResponse(false, "", []map[string]any{
+				reviewThreadResponse("PRRT_2", false, true, nil, nil, 12, 10, reviewCommentsResponse(false, "", []map[string]any{
+					reviewCommentResponse("PRRC_3", "outdated location", "2026-06-01T14:10:00Z", "2026-06-01T14:11:00Z"),
+				})),
+			}))
+		default:
+			t.Fatalf("unexpected graphql query: %s", req.Query)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient("test-token", WithBaseURLs(server.URL, server.URL+"/graphql"))
+	threads, err := client.PullRequestReviewThreads(context.Background(), model.PullRequest{
+		Owner:  "octo-org",
+		Repo:   "prdash",
+		Number: 12,
+	}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 3 {
+		t.Fatalf("requests = %d, want 3", requests)
+	}
+	line := 42
+	startLine := 40
+	originalLine := 41
+	originalStartLine := 39
+	outdatedOriginalLine := 12
+	outdatedOriginalStartLine := 10
+	want := []model.PullRequestReviewThread{
+		{
+			ID:                "PRRT_1",
+			Path:              "internal/app/app.go",
+			Line:              &line,
+			StartLine:         &startLine,
+			OriginalLine:      &originalLine,
+			OriginalStartLine: &originalStartLine,
+			DiffSide:          "RIGHT",
+			StartDiffSide:     "LEFT",
+			Comments: []model.PullRequestReviewComment{
+				{
+					ID:        "PRRC_1",
+					Author:    "reviewer",
+					URL:       "https://github.com/octo-org/prdash/pull/12#discussion_PRRC_1",
+					BodyText:  "please update this",
+					CreatedAt: time.Date(2026, 6, 1, 14, 0, 0, 0, time.UTC),
+					UpdatedAt: time.Date(2026, 6, 1, 14, 1, 0, 0, time.UTC),
+				},
+				{
+					ID:        "PRRC_2",
+					Author:    "reviewer",
+					URL:       "https://github.com/octo-org/prdash/pull/12#discussion_PRRC_2",
+					BodyText:  "follow-up",
+					CreatedAt: time.Date(2026, 6, 1, 14, 5, 0, 0, time.UTC),
+					UpdatedAt: time.Date(2026, 6, 1, 14, 6, 0, 0, time.UTC),
+				},
+			},
+		},
+		{
+			ID:                "PRRT_2",
+			IsOutdated:        true,
+			Path:              "internal/app/app.go",
+			OriginalLine:      &outdatedOriginalLine,
+			OriginalStartLine: &outdatedOriginalStartLine,
+			DiffSide:          "RIGHT",
+			StartDiffSide:     "LEFT",
+			Comments: []model.PullRequestReviewComment{
+				{
+					ID:        "PRRC_3",
+					Author:    "reviewer",
+					URL:       "https://github.com/octo-org/prdash/pull/12#discussion_PRRC_3",
+					BodyText:  "outdated location",
+					CreatedAt: time.Date(2026, 6, 1, 14, 10, 0, 0, time.UTC),
+					UpdatedAt: time.Date(2026, 6, 1, 14, 11, 0, 0, time.UTC),
+				},
+			},
+		},
+	}
+	if !reflect.DeepEqual(threads, want) {
+		t.Fatalf("review threads = %#v, want %#v", threads, want)
+	}
+}
+
+func reviewThreadsResponse(hasNextPage bool, endCursor string, nodes []map[string]any) map[string]any {
+	return map[string]any{"data": map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
+		"reviewThreads": map[string]any{
+			"pageInfo": map[string]any{"hasNextPage": hasNextPage, "endCursor": endCursor},
+			"nodes":    nodes,
+		},
+	}}}}
+}
+
+func reviewThreadResponse(id string, resolved, outdated bool, line, startLine, originalLine, originalStartLine any, comments map[string]any) map[string]any {
+	return map[string]any{
+		"id":                id,
+		"isResolved":        resolved,
+		"isOutdated":        outdated,
+		"path":              "internal/app/app.go",
+		"line":              line,
+		"startLine":         startLine,
+		"originalLine":      originalLine,
+		"originalStartLine": originalStartLine,
+		"diffSide":          "RIGHT",
+		"startDiffSide":     "LEFT",
+		"comments":          comments,
+	}
+}
+
+func reviewCommentsResponse(hasNextPage bool, endCursor string, nodes []map[string]any) map[string]any {
+	return map[string]any{
+		"pageInfo": map[string]any{"hasNextPage": hasNextPage, "endCursor": endCursor},
+		"nodes":    nodes,
+	}
+}
+
+func reviewCommentResponse(id, body, createdAt, updatedAt string) map[string]any {
+	return map[string]any{
+		"id":        id,
+		"author":    map[string]any{"login": "reviewer"},
+		"bodyText":  body,
+		"url":       "https://github.com/octo-org/prdash/pull/12#discussion_" + id,
+		"createdAt": createdAt,
+		"updatedAt": updatedAt,
 	}
 }
 

@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/danielwolfman/prdash/internal/config"
 	"github.com/danielwolfman/prdash/internal/model"
+	"github.com/gofrs/flock"
 )
 
 const (
@@ -24,6 +27,7 @@ const (
 	EventStackRebaseRequired = "stack_rebase_required"
 	EventChecksCompleted     = "checks_completed"
 	EventNewPRActivity       = "new_pr_comment_or_review"
+	EventReviewThreadChanged = "unresolved_review_thread_changed"
 	EventPRDiscovered        = "pr_discovered"
 	EventNewPRByAuthor       = "new_pr_by_author"
 	EventPRReadyForReview    = "pr_ready_for_review"
@@ -31,7 +35,12 @@ const (
 	EventPRMerged            = "pr_merged"
 )
 
-const defaultTimeout = 30 * time.Second
+const (
+	defaultTimeout            = 30 * time.Second
+	maxConcurrentHookCommands = 4
+)
+
+var ErrStateLocked = errors.New("another prdash monitor is already running")
 
 type Logger interface {
 	Info(string, map[string]any)
@@ -42,13 +51,16 @@ type Logger interface {
 type Executor func(context.Context, config.HookCommandConfig, Payload) error
 
 type Dispatcher struct {
-	enabled   bool
-	host      string
-	commands  []config.HookCommandConfig
-	statePath string
-	logger    Logger
-	execute   Executor
-	now       func() time.Time
+	enabled       bool
+	host          string
+	commands      []config.HookCommandConfig
+	statePath     string
+	logger        Logger
+	execute       Executor
+	now           func() time.Time
+	stateLock     *flock.Flock
+	dispatchSlots chan struct{}
+	dispatchWG    sync.WaitGroup
 
 	mu    sync.Mutex
 	state stateFile
@@ -60,16 +72,17 @@ type Dispatcher struct {
 }
 
 type Payload struct {
-	SchemaVersion int              `json:"schema_version"`
-	Event         string           `json:"event"`
-	ObservedAt    string           `json:"observed_at"`
-	GitHubHost    string           `json:"github_host"`
-	PR            PRPayload        `json:"pr"`
-	Summary       SummaryPayload   `json:"summary"`
-	Activity      *ActivityPayload `json:"activity,omitempty"`
-	PrimaryJob    *JobPayload      `json:"primary_job,omitempty"`
-	FailedJobs    []JobPayload     `json:"failed_jobs,omitempty"`
-	WorkflowRuns  []RunPayload     `json:"workflow_runs"`
+	SchemaVersion int                  `json:"schema_version"`
+	Event         string               `json:"event"`
+	ObservedAt    string               `json:"observed_at"`
+	GitHubHost    string               `json:"github_host"`
+	PR            PRPayload            `json:"pr"`
+	Summary       SummaryPayload       `json:"summary"`
+	Activity      *ActivityPayload     `json:"activity,omitempty"`
+	ReviewThread  *ReviewThreadPayload `json:"review_thread,omitempty"`
+	PrimaryJob    *JobPayload          `json:"primary_job,omitempty"`
+	FailedJobs    []JobPayload         `json:"failed_jobs,omitempty"`
+	WorkflowRuns  []RunPayload         `json:"workflow_runs"`
 }
 
 type PRPayload struct {
@@ -150,9 +163,33 @@ type ActivityPayload struct {
 	UpdatedAt string                        `json:"updated_at,omitempty"`
 }
 
+type ReviewThreadPayload struct {
+	ID                string                 `json:"id"`
+	IsResolved        bool                   `json:"is_resolved"`
+	IsOutdated        bool                   `json:"is_outdated"`
+	Path              string                 `json:"path"`
+	Line              *int                   `json:"line,omitempty"`
+	StartLine         *int                   `json:"start_line,omitempty"`
+	OriginalLine      *int                   `json:"original_line,omitempty"`
+	OriginalStartLine *int                   `json:"original_start_line,omitempty"`
+	DiffSide          string                 `json:"diff_side,omitempty"`
+	StartDiffSide     string                 `json:"start_diff_side,omitempty"`
+	Comments          []ReviewCommentPayload `json:"comments"`
+}
+
+type ReviewCommentPayload struct {
+	ID        string `json:"id"`
+	Author    string `json:"author"`
+	URL       string `json:"url"`
+	BodyText  string `json:"body_text"`
+	CreatedAt string `json:"created_at,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+}
+
 type stateFile struct {
 	PRHeads                map[string]headState      `json:"pr_heads"`
 	PRActivities           map[string]activityState  `json:"pr_activities"`
+	PRReviewThreads        map[string]activityState  `json:"pr_review_threads"`
 	PRLifecycles           map[string]lifecycleState `json:"pr_lifecycles"`
 	PRLifecycleInitialized bool                      `json:"pr_lifecycle_initialized,omitempty"`
 }
@@ -205,26 +242,56 @@ func NewDispatcher(cfg config.Config, logger Logger) (*Dispatcher, error) {
 		return nil, err
 	}
 	dispatcher := &Dispatcher{
-		enabled:   cfg.Hooks.Enabled && len(commands) > 0,
-		host:      cfg.GitHub.Host,
-		commands:  commands,
-		statePath: statePath,
-		logger:    logger,
-		execute:   runCommand,
-		now:       time.Now,
+		enabled:       cfg.Hooks.Enabled && len(commands) > 0,
+		host:          cfg.GitHub.Host,
+		commands:      commands,
+		statePath:     statePath,
+		logger:        logger,
+		execute:       runCommand,
+		now:           time.Now,
+		dispatchSlots: make(chan struct{}, maxConcurrentHookCommands),
 		state: stateFile{
-			PRHeads:      map[string]headState{},
-			PRActivities: map[string]activityState{},
-			PRLifecycles: map[string]lifecycleState{},
+			PRHeads:         map[string]headState{},
+			PRActivities:    map[string]activityState{},
+			PRReviewThreads: map[string]activityState{},
+			PRLifecycles:    map[string]lifecycleState{},
 		},
 		discovered: map[string]struct{}{},
 	}
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		return nil, err
+	}
+	stateLock := flock.New(statePath + ".lock")
+	locked, err := stateLock.TryLock()
+	if err != nil {
+		return nil, fmt.Errorf("lock prdash monitor: %w", err)
+	}
+	if !locked {
+		return nil, fmt.Errorf("%w; stop it before starting another: %s", ErrStateLocked, statePath)
+	}
+	dispatcher.stateLock = stateLock
 	if dispatcher.enabled {
 		if err := dispatcher.loadState(); err != nil {
+			_ = stateLock.Close()
 			return nil, err
 		}
 	}
 	return dispatcher, nil
+}
+
+func (d *Dispatcher) Close() error {
+	if d == nil {
+		return nil
+	}
+	d.dispatchWG.Wait()
+	d.mu.Lock()
+	stateLock := d.stateLock
+	d.stateLock = nil
+	d.mu.Unlock()
+	if stateLock == nil {
+		return nil
+	}
+	return stateLock.Close()
 }
 
 func (d *Dispatcher) WantsPullRequestActivity() bool {
@@ -233,6 +300,18 @@ func (d *Dispatcher) WantsPullRequestActivity() bool {
 	}
 	for _, command := range d.commands {
 		if command.Event == EventNewPRActivity {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Dispatcher) WantsReviewThreads() bool {
+	if d == nil || !d.enabled {
+		return false
+	}
+	for _, command := range d.commands {
+		if command.Event == EventReviewThreadChanged {
 			return true
 		}
 	}
@@ -436,6 +515,68 @@ func (d *Dispatcher) ObserveActivities(ctx context.Context, pr model.PullRequest
 	}
 }
 
+func (d *Dispatcher) ObserveReviewThreads(ctx context.Context, pr model.PullRequest, threads []model.PullRequestReviewThread) {
+	if d == nil || !d.enabled || !d.WantsReviewThreads() {
+		return
+	}
+	key := activityStateKey(pr)
+	now := d.now().UTC()
+
+	d.mu.Lock()
+	previousState, hadPreviousState := d.state.PRReviewThreads[key]
+	state := previousState
+	state.Seen = maps.Clone(previousState.Seen)
+	if state.Seen == nil {
+		state.Seen = map[string]string{}
+	}
+	initialObservation := !state.Initialized
+	stateChanged := initialObservation
+	var payloads []Payload
+	for _, thread := range threads {
+		if thread.ID == "" {
+			continue
+		}
+		fingerprint := reviewThreadFingerprint(thread)
+		if !initialObservation {
+			if previous, ok := state.Seen[thread.ID]; ok && previous == fingerprint {
+				continue
+			}
+		}
+		state.Seen[thread.ID] = fingerprint
+		stateChanged = true
+		if !thread.IsResolved {
+			payloads = append(payloads, d.reviewThreadPayload(now, pr, thread))
+		}
+	}
+	state.Initialized = true
+	if !stateChanged {
+		d.mu.Unlock()
+		return
+	}
+	state.UpdatedAt = now.Format(time.RFC3339Nano)
+	d.state.PRReviewThreads[key] = state
+	if err := d.saveStateLocked(); err != nil {
+		if hadPreviousState {
+			d.state.PRReviewThreads[key] = previousState
+		} else {
+			delete(d.state.PRReviewThreads, key)
+		}
+		if d.logger != nil {
+			d.logger.Error("hook_state_save_error", map[string]any{
+				"state_path": d.statePath,
+				"error":      err.Error(),
+			})
+		}
+		d.mu.Unlock()
+		return
+	}
+	d.mu.Unlock()
+
+	for _, payload := range payloads {
+		d.dispatch(ctx, payload)
+	}
+}
+
 func (d *Dispatcher) ObserveLifecycles(ctx context.Context, prs []model.PullRequest, lookup PullRequestLookup) {
 	if d == nil || !d.enabled || !d.WantsPullRequestLifecycle() {
 		return
@@ -575,7 +716,15 @@ func (d *Dispatcher) dispatch(ctx context.Context, payload Payload) {
 			continue
 		}
 		command := command
+		select {
+		case d.dispatchSlots <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		d.dispatchWG.Add(1)
 		go func() {
+			defer d.dispatchWG.Done()
+			defer func() { <-d.dispatchSlots }()
 			if d.logger != nil {
 				d.logger.Info("hook_dispatch_start", map[string]any{
 					"event":     payload.Event,
@@ -658,6 +807,41 @@ func (d *Dispatcher) activityPayload(event string, observedAt time.Time, pr mode
 			State:     activity.State,
 			CreatedAt: formatTime(activity.CreatedAt),
 			UpdatedAt: formatTime(activity.UpdatedAt),
+		},
+		WorkflowRuns: []RunPayload{},
+	}
+}
+
+func (d *Dispatcher) reviewThreadPayload(observedAt time.Time, pr model.PullRequest, thread model.PullRequestReviewThread) Payload {
+	comments := make([]ReviewCommentPayload, 0, len(thread.Comments))
+	for _, comment := range thread.Comments {
+		comments = append(comments, ReviewCommentPayload{
+			ID:        comment.ID,
+			Author:    comment.Author,
+			URL:       comment.URL,
+			BodyText:  comment.BodyText,
+			CreatedAt: formatTime(comment.CreatedAt),
+			UpdatedAt: formatTime(comment.UpdatedAt),
+		})
+	}
+	return Payload{
+		SchemaVersion: 1,
+		Event:         EventReviewThreadChanged,
+		ObservedAt:    observedAt.Format(time.RFC3339Nano),
+		GitHubHost:    d.host,
+		PR:            prPayload(pr),
+		ReviewThread: &ReviewThreadPayload{
+			ID:                thread.ID,
+			IsResolved:        thread.IsResolved,
+			IsOutdated:        thread.IsOutdated,
+			Path:              thread.Path,
+			Line:              thread.Line,
+			StartLine:         thread.StartLine,
+			OriginalLine:      thread.OriginalLine,
+			OriginalStartLine: thread.OriginalStartLine,
+			DiffSide:          thread.DiffSide,
+			StartDiffSide:     thread.StartDiffSide,
+			Comments:          comments,
 		},
 		WorkflowRuns: []RunPayload{},
 	}
@@ -766,6 +950,9 @@ func (d *Dispatcher) loadState() error {
 		if d.state.PRActivities == nil {
 			d.state.PRActivities = map[string]activityState{}
 		}
+		if d.state.PRReviewThreads == nil {
+			d.state.PRReviewThreads = map[string]activityState{}
+		}
 		if d.state.PRLifecycles == nil {
 			d.state.PRLifecycles = map[string]lifecycleState{}
 		}
@@ -774,6 +961,7 @@ func (d *Dispatcher) loadState() error {
 	if os.IsNotExist(err) {
 		d.state.PRHeads = map[string]headState{}
 		d.state.PRActivities = map[string]activityState{}
+		d.state.PRReviewThreads = map[string]activityState{}
 		d.state.PRLifecycles = map[string]lifecycleState{}
 		return nil
 	}
@@ -786,6 +974,9 @@ func (d *Dispatcher) saveStateLocked() error {
 	}
 	if d.state.PRActivities == nil {
 		d.state.PRActivities = map[string]activityState{}
+	}
+	if d.state.PRReviewThreads == nil {
+		d.state.PRReviewThreads = map[string]activityState{}
 	}
 	if d.state.PRLifecycles == nil {
 		d.state.PRLifecycles = map[string]lifecycleState{}
@@ -807,6 +998,12 @@ func stateKey(pr model.PullRequest) string {
 
 func activityStateKey(pr model.PullRequest) string {
 	return fmt.Sprintf("%s#%d", strings.ToLower(pr.RepoFullName), pr.Number)
+}
+
+func reviewThreadFingerprint(thread model.PullRequestReviewThread) string {
+	data, _ := json.Marshal(thread)
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("v1:%x", sum)
 }
 
 func lifecycleStateKey(pr model.PullRequest) string {

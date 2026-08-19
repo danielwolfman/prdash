@@ -3,6 +3,7 @@ package hooks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -376,6 +377,281 @@ func TestDispatcherBaselinesThenFiresNewPRActivity(t *testing.T) {
 	calls.assertNoMore(t)
 }
 
+func TestDispatcherEmitsNewOrChangedUnresolvedReviewThreads(t *testing.T) {
+	dispatcher, calls := testDispatcher(t)
+	pr := testPR()
+	line := 42
+	originalLine := 41
+	initial := model.PullRequestReviewThread{
+		ID:            "PRRT_1",
+		Path:          "internal/app/app.go",
+		Line:          &line,
+		OriginalLine:  &originalLine,
+		DiffSide:      "RIGHT",
+		StartDiffSide: "LEFT",
+		Comments: []model.PullRequestReviewComment{
+			{
+				ID:        "PRRC_1",
+				Author:    "reviewer",
+				URL:       "https://github.com/octo-org/prdash/pull/7#discussion_r1",
+				BodyText:  "existing comment",
+				CreatedAt: time.Date(2026, 6, 8, 8, 0, 0, 0, time.UTC),
+				UpdatedAt: time.Date(2026, 6, 8, 8, 0, 0, 0, time.UTC),
+			},
+		},
+	}
+
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{initial})
+	initialCall := calls.collect(t, 1)[0]
+	if initialCall.ReviewThread == nil || initialCall.ReviewThread.ID != "PRRT_1" {
+		t.Fatalf("initial review thread payload = %#v", initialCall.ReviewThread)
+	}
+	if initialCall.ReviewThread.OriginalLine == nil || *initialCall.ReviewThread.OriginalLine != 41 || initialCall.ReviewThread.StartDiffSide != "LEFT" {
+		t.Fatalf("initial review thread location = %#v", initialCall.ReviewThread)
+	}
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{initial})
+	calls.assertNoMore(t)
+
+	changed := initial
+	changed.Comments = append([]model.PullRequestReviewComment(nil), initial.Comments...)
+	changed.Comments[0].BodyText = "edited comment"
+	changed.Comments[0].UpdatedAt = time.Date(2026, 6, 8, 8, 5, 0, 0, time.UTC)
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{changed})
+
+	changedCall := calls.collect(t, 1)[0]
+	if changedCall.Event != EventReviewThreadChanged {
+		t.Fatalf("event = %q, want %q", changedCall.Event, EventReviewThreadChanged)
+	}
+	if changedCall.ReviewThread == nil || changedCall.ReviewThread.ID != "PRRT_1" || changedCall.ReviewThread.IsResolved {
+		t.Fatalf("review thread payload = %#v", changedCall.ReviewThread)
+	}
+	if len(changedCall.ReviewThread.Comments) != 1 || changedCall.ReviewThread.Comments[0].BodyText != "edited comment" {
+		t.Fatalf("review comments = %#v", changedCall.ReviewThread.Comments)
+	}
+
+	resolved := changed
+	resolved.IsResolved = true
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{resolved})
+	calls.assertNoMore(t)
+
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{changed})
+	reopenedCall := calls.collect(t, 1)[0]
+	if reopenedCall.ReviewThread == nil || reopenedCall.ReviewThread.IsResolved {
+		t.Fatalf("reopened review thread payload = %#v", reopenedCall.ReviewThread)
+	}
+
+	newThread := initial
+	newThread.ID = "PRRT_2"
+	newThread.Comments = append([]model.PullRequestReviewComment(nil), initial.Comments...)
+	newThread.Comments[0].ID = "PRRC_2"
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{changed, newThread})
+	newCall := calls.collect(t, 1)[0]
+	if newCall.ReviewThread == nil || newCall.ReviewThread.ID != "PRRT_2" {
+		t.Fatalf("new review thread payload = %#v", newCall.ReviewThread)
+	}
+	calls.assertNoMore(t)
+}
+
+func TestReviewThreadFingerprintIncludesEmissionTriggers(t *testing.T) {
+	line := 42
+	startLine := 40
+	originalLine := 41
+	originalStartLine := 39
+	base := model.PullRequestReviewThread{
+		ID:                "PRRT_1",
+		Path:              "internal/app/app.go",
+		Line:              &line,
+		StartLine:         &startLine,
+		OriginalLine:      &originalLine,
+		OriginalStartLine: &originalStartLine,
+		DiffSide:          "RIGHT",
+		StartDiffSide:     "RIGHT",
+		Comments: []model.PullRequestReviewComment{
+			{ID: "PRRC_1", BodyText: "please update this"},
+		},
+	}
+	baseline := reviewThreadFingerprint(base)
+	tests := []struct {
+		name   string
+		mutate func(*model.PullRequestReviewThread)
+	}{
+		{name: "reply", mutate: func(thread *model.PullRequestReviewThread) {
+			thread.Comments = append(thread.Comments, model.PullRequestReviewComment{ID: "PRRC_2", BodyText: "follow-up"})
+		}},
+		{name: "outdated", mutate: func(thread *model.PullRequestReviewThread) {
+			thread.IsOutdated = true
+		}},
+		{name: "line", mutate: func(thread *model.PullRequestReviewThread) {
+			changedLine := 43
+			thread.Line = &changedLine
+		}},
+		{name: "range", mutate: func(thread *model.PullRequestReviewThread) {
+			changedStartLine := 38
+			thread.OriginalStartLine = &changedStartLine
+		}},
+		{name: "diff side", mutate: func(thread *model.PullRequestReviewThread) {
+			thread.StartDiffSide = "LEFT"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := base
+			changed.Comments = append([]model.PullRequestReviewComment(nil), base.Comments...)
+			test.mutate(&changed)
+			if reviewThreadFingerprint(changed) == baseline {
+				t.Fatal("fingerprint did not change")
+			}
+		})
+	}
+}
+
+func TestDispatcherRetriesReviewThreadAfterStateSaveFailure(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "hooks-state.json")
+	dispatcher, calls := testDispatcherAt(t, statePath)
+	pr := testPR()
+	thread := model.PullRequestReviewThread{
+		ID:         "PRRT_1",
+		IsResolved: true,
+		Path:       "internal/app/app.go",
+		Comments:   []model.PullRequestReviewComment{{ID: "PRRC_1", BodyText: "please update this"}},
+	}
+
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{thread})
+	calls.assertNoMore(t)
+	persistedFingerprint := dispatcher.state.PRReviewThreads[activityStateKey(pr)].Seen[thread.ID]
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	thread.IsResolved = false
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{thread})
+	dispatcher.dispatchWG.Wait()
+	if len(calls.ch) != 0 {
+		t.Fatalf("dispatched payloads after failed state save = %d, want 0", len(calls.ch))
+	}
+	if got := dispatcher.state.PRReviewThreads[activityStateKey(pr)].Seen[thread.ID]; got != persistedFingerprint {
+		t.Fatalf("fingerprint after failed state save = %q, want %q", got, persistedFingerprint)
+	}
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{thread})
+	calls.collect(t, 1)
+	dispatcher.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{thread})
+	calls.assertNoMore(t)
+}
+
+func TestDispatcherPersistsReviewThreadStateAcrossRestarts(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "hooks-state.json")
+	line := 42
+	thread := model.PullRequestReviewThread{
+		ID:   "PRRT_1",
+		Path: "internal/app/app.go",
+		Line: &line,
+		Comments: []model.PullRequestReviewComment{
+			{ID: "PRRC_1", BodyText: "please update this"},
+		},
+	}
+	pr := testPR()
+
+	first, firstCalls := testDispatcherAt(t, statePath)
+	first.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{thread})
+	firstCalls.collect(t, 1)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, secondCalls := testDispatcherAt(t, statePath)
+	second.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{thread})
+	secondCalls.assertNoMore(t)
+	resolved := thread
+	resolved.IsResolved = true
+	second.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{resolved})
+	secondCalls.assertNoMore(t)
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	third, thirdCalls := testDispatcherAt(t, statePath)
+	third.ObserveReviewThreads(context.Background(), pr, []model.PullRequestReviewThread{thread})
+	reopened := thirdCalls.collect(t, 1)[0]
+	if reopened.ReviewThread == nil || reopened.ReviewThread.IsResolved {
+		t.Fatalf("reopened review thread payload = %#v", reopened.ReviewThread)
+	}
+	thirdCalls.assertNoMore(t)
+}
+
+func TestDispatcherAllowsOnlyOneMonitorWhenHooksAreDisabled(t *testing.T) {
+	cfg := config.Default()
+	cfg.Hooks.StatePath = filepath.Join(t.TempDir(), "hooks-state.json")
+
+	first, err := NewDispatcher(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	if _, err := NewDispatcher(cfg, nil); !errors.Is(err, ErrStateLocked) {
+		t.Fatalf("second dispatcher error = %v, want %v", err, ErrStateLocked)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := NewDispatcher(cfg, nil)
+	if err != nil {
+		t.Fatalf("replacement dispatcher: %v", err)
+	}
+	t.Cleanup(func() { _ = replacement.Close() })
+}
+
+func TestDispatcherBoundsConcurrentHookCommands(t *testing.T) {
+	dispatcher, _ := testDispatcher(t)
+	started := make(chan struct{}, 20)
+	executed := make(chan struct{}, 20)
+	release := make(chan struct{})
+	dispatcher.execute = func(_ context.Context, _ config.HookCommandConfig, _ Payload) error {
+		executed <- struct{}{}
+		started <- struct{}{}
+		<-release
+		return nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 20 {
+			dispatcher.dispatch(context.Background(), Payload{Event: EventReviewThreadChanged})
+		}
+	}()
+	for range maxConcurrentHookCommands {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for hook command")
+		}
+	}
+	select {
+	case <-started:
+		t.Fatalf("more than %d hook commands started concurrently", maxConcurrentHookCommands)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out draining hook commands")
+	}
+	if err := dispatcher.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(executed) != 20 {
+		t.Fatalf("executed hook commands = %d, want 20", len(executed))
+	}
+}
+
 func TestDispatcherBaselinesThenFiresNewPRLifecycle(t *testing.T) {
 	dispatcher, calls := testDispatcher(t)
 	pr := testPR()
@@ -433,6 +709,9 @@ func TestDispatcherFiresPRDiscoveredOncePerProcess(t *testing.T) {
 	}
 	dispatcher.ObserveLifecycles(context.Background(), []model.PullRequest{pr}, nil)
 	calls.assertNoMore(t)
+	if err := dispatcher.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Discovery is process-local even though lifecycle dedupe state persists.
 	restarted, restartedCalls := newDispatcher()
@@ -623,15 +902,21 @@ func findPayload(payloads []Payload, event string) (Payload, bool) {
 
 func testDispatcher(t *testing.T) (*Dispatcher, payloadCollector) {
 	t.Helper()
+	return testDispatcherAt(t, filepath.Join(t.TempDir(), "hooks-state.json"))
+}
+
+func testDispatcherAt(t *testing.T, statePath string) (*Dispatcher, payloadCollector) {
+	t.Helper()
 	cfg := config.Default()
 	cfg.Hooks.Enabled = true
-	cfg.Hooks.StatePath = filepath.Join(t.TempDir(), "hooks-state.json")
+	cfg.Hooks.StatePath = statePath
 	cfg.Hooks.Commands = []config.HookCommandConfig{
 		{Event: EventFirstCheckFailure, Command: []string{"hook"}},
 		{Event: EventMergeConflict, Command: []string{"hook"}},
 		{Event: EventStackRebaseRequired, Command: []string{"hook"}},
 		{Event: EventChecksCompleted, Command: []string{"hook"}},
 		{Event: EventNewPRActivity, Command: []string{"hook"}},
+		{Event: EventReviewThreadChanged, Command: []string{"hook"}},
 		{Event: EventNewPRByAuthor, Command: []string{"hook"}},
 		{Event: EventPRReadyForReview, Command: []string{"hook"}},
 		{Event: EventPRClosed, Command: []string{"hook"}},
@@ -641,6 +926,7 @@ func testDispatcher(t *testing.T) (*Dispatcher, payloadCollector) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = dispatcher.Close() })
 	calls := payloadCollector{ch: make(chan Payload, 10)}
 	dispatcher.execute = func(_ context.Context, _ config.HookCommandConfig, payload Payload) error {
 		calls.ch <- payload
