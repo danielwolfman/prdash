@@ -79,6 +79,7 @@ func New(dashboard Dashboard) Model {
 	if len(dashboard.Rows) > 0 {
 		loadText = "loaded"
 	}
+	dashboard.Rows = groupRows(dashboard.Rows)
 	return Model{
 		dashboard: dashboard,
 		width:     120,
@@ -245,6 +246,9 @@ func (m Model) header() string {
 	if !m.loading {
 		state = "live"
 	}
+	if m.dashboard.EventsDisabled {
+		state += " · events off"
+	}
 	text := fmt.Sprintf(" prdash · %s · %s%s · %s %s ",
 		valueOr(m.dashboard.User, "unknown"),
 		loaded,
@@ -334,94 +338,135 @@ func (m Model) renderRow(index int, row Row) []string {
 	if focused {
 		selectedJob = m.currentJobCursor()
 	}
-	expanded := m.expanded[index]
-	jobs := allJobs(row.Runs)
-	summary := model.SummarizeJobs(jobs)
-	stale := m.rowStale(row)
-
+	width := max(1, m.width-4)
 	marker := " "
 	if focused {
 		marker = m.symbols.focus
-	} else if stale {
-		marker = m.symbols.stale
 	}
-
-	titleWidth := clamp(m.width-95, 18, 56)
-	title := fitPlain(row.PR.Title, titleWidth)
-	badges := m.badges(row)
-	summaryText := m.summary(summary, row.FetchError)
-	statusSuffix := fmt.Sprintf("updated %s", relativeTime(row.PR.UpdatedAt, m.now))
-	if stale {
-		statusSuffix += " " + m.styles.stale.Render("stale")
-	}
-	if m.now.Before(row.ChangedUntil) {
-		statusSuffix += " " + m.styles.forState(row.ChangeState).Render("changed")
-	}
-	if row.Loading && (len(row.Runs) > 0 || row.FetchError != "") {
-		statusSuffix += " " + m.styles.running.Render(m.symbols.forState(model.CheckRunning, m.frame)+" refreshing")
-	}
-	if !row.LastFetched.IsZero() {
-		statusSuffix += " checked " + relativeTime(row.LastFetched, m.now)
-	}
-	heading := fmt.Sprintf("%s %s#%d %-*s %s %s %s",
-		marker,
-		row.PR.RepoFullName,
-		row.PR.Number,
-		titleWidth,
-		title,
-		badges,
-		summaryText,
-		statusSuffix,
-	)
+	title := fmt.Sprintf("%s %s#%d  %s", marker, m.repoLabel(row.PR), row.PR.Number, row.PR.Title)
+	heading := fitPlain(title, width)
 	if focused && selectedJob < 0 {
-		heading = m.styles.focused.Render(heading)
-	} else if stale {
-		heading = m.styles.stale.Render(heading)
+		heading = m.styles.focused.Width(width).Render(heading)
 	} else {
 		heading = m.styles.row.Render(heading)
 	}
-
-	var lines []string
-	lines = append(lines, heading)
-	if row.Loading && len(row.Runs) == 0 && row.FetchError == "" {
-		lines = append(lines, "  "+m.styles.running.Render(m.symbols.forState(model.CheckRunning, m.frame)+" loading jobs..."))
-		return lines
+	arrow := " ← "
+	if m.symbols.ascii {
+		arrow = " <- "
 	}
-	if row.FetchError != "" {
-		lines = append(lines, "  "+m.styles.error.Render(fitPlain("actions unavailable: "+row.FetchError, max(20, m.width-4))))
-		return lines
+	base := valueOr(row.PR.BaseRefName, "unknown")
+	head := valueOr(row.PR.HeadRefName, "unknown")
+	branchWidth := max(1, (width-lipgloss.Width(arrow))/2)
+	branches := m.styles.workflow.Render(fitPlain(base, branchWidth)) + m.styles.muted.Render(arrow) + m.styles.workflow.Render(fitPlain(head, max(1, width-min(lipgloss.Width(base), branchWidth)-lipgloss.Width(arrow))))
+	status := m.badges(row)
+	if row.group.Key != "" {
+		status = fmt.Sprintf("%d/%d  ", row.group.Position, row.group.Size) + status
 	}
-	if len(row.Runs) == 0 {
-		lines = append(lines, "  "+m.styles.muted.Render("no current GitHub Actions runs found"))
-		return lines
+	status += "  " + m.summary(model.SummarizeJobs(allJobs(row.Runs)), row.FetchError)
+	if row.PR.StackNeedsRebase {
+		status += " " + m.styles.waiting.Render("needs rebase")
 	}
-
-	visibleJobs := m.visibleJobs(row.Runs, expanded)
-	if len(visibleJobs) > 0 {
-		for idx, job := range visibleJobs {
+	if m.rowStale(row) {
+		status += " " + m.styles.stale.Render("stale")
+	}
+	if m.now.Before(row.ChangedUntil) {
+		status += " " + m.styles.forState(row.ChangeState).Render("changed")
+	}
+	if row.Loading {
+		status += " " + m.styles.running.Render("refreshing")
+	}
+	freshness := "updated " + relativeTime(row.PR.UpdatedAt, m.now)
+	if !row.LastFetched.IsZero() {
+		freshness += " · checked " + relativeTime(row.LastFetched, m.now)
+	}
+	lines := []string{heading, branches, columns(status, m.styles.muted.Render(freshness), width)}
+	switch {
+	case row.Loading && len(row.Runs) == 0 && row.FetchError == "":
+		lines = append(lines, m.styles.running.Render(m.symbols.forState(model.CheckRunning, m.frame)+" loading jobs..."))
+	case row.FetchError != "":
+		lines = append(lines, m.styles.error.Render(fitPlain("actions unavailable: "+row.FetchError, width)))
+	case len(row.Runs) == 0:
+		lines = append(lines, m.styles.muted.Render("no current GitHub Actions runs found"))
+	default:
+		jobs := m.visibleJobs(row.Runs, m.expanded[index])
+		for idx, job := range jobs {
 			line := m.jobLine(job)
 			if focused && selectedJob == idx {
 				line = m.styles.focused.Render(line)
 			}
-			lines = append(lines, "  "+line)
+			lines = append(lines, line)
 		}
-		total := len(allJobs(row.Runs))
-		if total > len(visibleJobs) {
-			lines = append(lines, m.styles.muted.Render(fmt.Sprintf("  ... %d successful/older jobs hidden", total-len(visibleJobs))))
+		if hidden := len(allJobs(row.Runs)) - len(jobs); hidden > 0 {
+			lines = append(lines, m.styles.muted.Render(fmt.Sprintf("  ... %d successful/older jobs hidden", hidden)))
 		}
 	}
-	if rowFullyGreen(row, summary) {
-		return m.greenBox(lines)
-	}
-	return lines
+	return m.frameRow(row, lines)
 }
 
-func (m Model) greenBox(lines []string) []string {
-	if len(lines) == 0 {
-		return lines
+func (m Model) repoLabel(pr model.PullRequest) string {
+	if m.dashboard.HideOwner {
+		_, repo, ok := strings.Cut(pr.RepoFullName, "/")
+		if ok {
+			return repo
+		}
+		return valueOr(pr.Repo, pr.RepoFullName)
 	}
-	boxWidth := max(20, m.width-2)
-	return strings.Split(m.styles.greenBox.Width(boxWidth).Render(strings.Join(lines, "\n")), "\n")
+	return pr.RepoFullName
+}
+
+// columns uses terminal cell widths and reserves the right edge for metadata.
+func columns(left, right string, width int) string {
+	if lipgloss.Width(left)+lipgloss.Width(right)+2 > width {
+		return fitANSI(left, width)
+	}
+	return left + strings.Repeat(" ", width-lipgloss.Width(left)-lipgloss.Width(right)) + right
+}
+
+func (m Model) frameRow(row Row, lines []string) []string {
+	border := lipgloss.RoundedBorder()
+	if m.symbols.ascii {
+		border = lipgloss.ASCIIBorder()
+	}
+	color := lipgloss.Color("240")
+	label := ""
+	first, last := true, true
+	if row.group.Key != "" {
+		color = groupColor(row.group.Key)
+		first, last = row.group.Position == 1, row.group.Position == row.group.Size
+		label = row.group.Label + fmt.Sprintf(" · %d visible · base first", row.group.Size)
+	} else if rowFullyGreen(row, model.SummarizeJobs(allJobs(row.Runs))) {
+		color = lipgloss.Color("42")
+	}
+	style := lipgloss.NewStyle().Foreground(color)
+	inner := max(1, m.width-2)
+	var framed []string
+	left, right := border.TopLeft, border.TopRight
+	if !first {
+		left, right = border.MiddleLeft, border.MiddleRight
+	}
+	top := strings.Repeat(border.Top, inner)
+	if first && label != "" {
+		text := " " + fitPlain(label, max(1, inner-2)) + " "
+		top = text + strings.Repeat(border.Top, max(0, inner-lipgloss.Width(text)))
+	}
+	framed = append(framed, style.Render(left+top+right))
+	for _, line := range lines {
+		line = fitANSI(line, max(1, inner-2))
+		framed = append(framed, style.Render(border.Left)+" "+line+strings.Repeat(" ", max(0, inner-1-lipgloss.Width(line)))+style.Render(border.Right))
+	}
+	if last {
+		framed = append(framed, style.Render(border.BottomLeft+strings.Repeat(border.Bottom, inner)+border.BottomRight), "")
+	}
+	return framed
+}
+
+func groupColor(key string) lipgloss.Color {
+	palette := []lipgloss.Color{"75", "213", "81", "141", "215", "117"}
+	hash := uint32(2166136261)
+	for _, c := range key {
+		hash = (hash ^ uint32(c)) * 16777619
+	}
+	return palette[int(hash)%len(palette)]
 }
 
 func rowFullyGreen(row Row, summary model.CheckSummary) bool {
@@ -487,7 +532,7 @@ func (m Model) summary(summary model.CheckSummary, fetchError string) string {
 	return strings.Join(parts, " ")
 }
 
-func (m Model) visibleJobs(runs []model.WorkflowRun, expanded bool) []displayJob {
+func (m Model) visibleJobs(runs []model.WorkflowRun, expanded bool) []model.Job {
 	limit := 6
 	if expanded {
 		limit = 8
@@ -495,24 +540,19 @@ func (m Model) visibleJobs(runs []model.WorkflowRun, expanded bool) []displayJob
 	return prioritizedJobs(runs, limit)
 }
 
-type displayJob struct {
-	Workflow string
-	Job      model.Job
-}
-
-func prioritizedJobs(runs []model.WorkflowRun, limit int) []displayJob {
-	var jobs []displayJob
+func prioritizedJobs(runs []model.WorkflowRun, limit int) []model.Job {
+	var jobs []model.Job
 	for _, run := range runs {
 		for _, job := range run.Jobs {
-			jobs = append(jobs, displayJob{Workflow: run.Name, Job: job})
+			jobs = append(jobs, job)
 		}
 	}
 	sort.SliceStable(jobs, func(i, j int) bool {
-		ip, jp := jobPriority(jobs[i].Job.State), jobPriority(jobs[j].Job.State)
+		ip, jp := jobPriority(jobs[i].State), jobPriority(jobs[j].State)
 		if ip != jp {
 			return ip < jp
 		}
-		return jobs[i].Job.StartedAt.After(jobs[j].Job.StartedAt)
+		return jobs[i].StartedAt.After(jobs[j].StartedAt)
 	})
 	if limit > 0 && len(jobs) > limit {
 		return jobs[:limit]
@@ -543,31 +583,30 @@ func jobPriority(state model.CheckState) int {
 	}
 }
 
-func (m Model) jobLine(display displayJob) string {
-	job := display.Job
-	symbol := m.symbols.forState(job.State, m.frame)
-	status := string(job.State)
-	if job.Conclusion != "" {
-		status = job.Conclusion
+func (m Model) jobLine(job model.Job) string {
+	width := max(1, m.width-4)
+	status := valueOr(job.Conclusion, string(job.State))
+	duration := "—"
+	if m.symbols.ascii {
+		duration = "-"
 	}
-	jobWidth := clamp(m.width-len(status)-6, 16, 96)
-	text := fmt.Sprintf("%s %-*s %s",
-		symbol,
-		jobWidth,
-		fitPlain(job.Name, jobWidth),
-		status,
-	)
-	if job.State == model.CheckSuccess || job.State == model.CheckNeutral {
-		text = fmt.Sprintf("%s %-*s %s",
-			symbol,
-			jobWidth,
-			fitPlain(abbreviate(job.Name), jobWidth),
-			status,
-		)
+	if !job.StartedAt.IsZero() {
+		end := job.CompletedAt
+		if end.IsZero() && job.State == model.CheckRunning {
+			end = m.now
+		}
+		if !end.IsZero() {
+			duration = end.Sub(job.StartedAt).Round(time.Second).String()
+		}
 	}
+	metadata := fmt.Sprintf("%16s %8s", status, duration)
+	nameWidth := max(1, width-lipgloss.Width(metadata)-4)
+	name := padRight(fitPlain(job.Name, nameWidth), nameWidth)
+	return m.styles.forState(job.State).Render(m.symbols.forState(job.State, m.frame) + " " + name + "  " + metadata)
+}
 
-	style := m.styles.forState(job.State)
-	return style.Render(text)
+func padRight(text string, width int) string {
+	return text + strings.Repeat(" ", max(0, width-lipgloss.Width(text)))
 }
 
 func (m Model) startLoader() tea.Cmd {
@@ -752,6 +791,7 @@ func (m *Model) applyLoadEvent(event LoadEvent) {
 		replaced := false
 		for i := range m.dashboard.Rows {
 			if samePR(m.dashboard.Rows[i].PR, row.PR) {
+				row.group = m.dashboard.Rows[i].group
 				m.dashboard.Rows[i] = m.mergeRowState(m.dashboard.Rows[i], row)
 				replaced = true
 				break
@@ -780,6 +820,8 @@ func (m *Model) applyLoadEvent(event LoadEvent) {
 
 func (m *Model) replaceRows(rows []Row) {
 	oldRows := m.dashboard.Rows
+	oldCursor := m.cursor
+	rows = groupRows(rows)
 	nextRows := make([]Row, 0, len(rows))
 	for _, row := range rows {
 		if row.LastFetched.IsZero() && !row.Loading {
@@ -802,13 +844,29 @@ func (m *Model) replaceRows(rows []Row) {
 	if m.cursor >= len(m.dashboard.Rows) {
 		m.cursor = len(m.dashboard.Rows) - 1
 	}
-	nextJobCursor := make(map[int]int, len(m.jobCursor))
-	for row := range m.jobCursor {
-		if row < len(m.dashboard.Rows) {
-			nextJobCursor[row] = m.jobCursor[row]
+	nextJobCursor := make(map[int]int)
+	nextExpanded := make(map[int]bool)
+	for i, row := range m.dashboard.Rows {
+		for j, old := range oldRows {
+			if samePR(row.PR, old.PR) {
+				if job, ok := m.jobCursor[j]; ok {
+					nextJobCursor[i] = job
+				}
+				nextExpanded[i] = m.expanded[j]
+			}
+		}
+	}
+	if oldCursor < len(oldRows) {
+		selected := oldRows[oldCursor].PR
+		for i, row := range m.dashboard.Rows {
+			if samePR(row.PR, selected) {
+				m.cursor = i
+				break
+			}
 		}
 	}
 	m.jobCursor = nextJobCursor
+	m.expanded = nextExpanded
 }
 
 func (m Model) mergeRowState(old, next Row) Row {
@@ -936,16 +994,16 @@ func (m Model) selectableItems() []selection {
 			Job:   -1,
 			URL:   row.PR.URL,
 			Label: fmt.Sprintf("%s#%d", row.PR.RepoFullName, row.PR.Number),
-			Line:  line,
+			Line:  line + 1,
 		})
 		for jobIdx, job := range m.visibleJobs(row.Runs, m.expanded[rowIdx]) {
 			items = append(items, selection{
 				Kind:  selectionJob,
 				Row:   rowIdx,
 				Job:   jobIdx,
-				URL:   job.Job.URL,
-				Label: job.Job.Name,
-				Line:  line + 1 + jobIdx,
+				URL:   job.URL,
+				Label: job.Name,
+				Line:  line + 4 + jobIdx,
 			})
 		}
 		line += len(rowLines)

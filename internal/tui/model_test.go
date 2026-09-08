@@ -44,7 +44,7 @@ func TestViewSupportsASCIISymbols(t *testing.T) {
 	if strings.Contains(view, "✓") || strings.Contains(view, "✗") || strings.Contains(view, "▸") {
 		t.Fatalf("ascii view contains unicode symbols:\n%s", view)
 	}
-	for _, want := range []string{">", "x integration", "v bld"} {
+	for _, want := range []string{">", "x integration", "v build"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("ascii view missing %q:\n%s", want, view)
 		}
@@ -192,7 +192,7 @@ func TestFullyGreenRowGetsGreenBox(t *testing.T) {
 	}
 
 	view := stripANSI(strings.Join(m.renderRow(0, row), "\n"))
-	if !strings.Contains(view, "┌") || !strings.Contains(view, "└") {
+	if !strings.Contains(view, "╭") || !strings.Contains(view, "╰") {
 		t.Fatalf("expected green boxed row, got:\n%s", view)
 	}
 }

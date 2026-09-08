@@ -35,6 +35,7 @@ query SearchPullRequests($query: String!, $first: Int!, $after: String) {
         updatedAt
         closedAt
         mergedAt
+        headRepository { nameWithOwner }
         headRefName
         headRefOid
         baseRefName
@@ -71,6 +72,7 @@ query PullRequest($owner: String!, $repo: String!, $number: Int!) {
       updatedAt
       closedAt
       mergedAt
+      headRepository { nameWithOwner }
       headRefName
       headRefOid
       baseRefName
@@ -310,6 +312,7 @@ func pullRequestFromNode(node pullRequestNode) model.PullRequest {
 		UpdatedAt:        node.UpdatedAt.Time,
 		ClosedAt:         node.ClosedAt.Time,
 		MergedAt:         node.MergedAt.Time,
+		HeadRepoFullName: node.HeadRepository.NameWithOwner,
 		HeadRefName:      node.HeadRefName,
 		HeadSHA:          node.HeadRefOid,
 		BaseRefName:      node.BaseRefName,
@@ -354,13 +357,16 @@ type pullRequestNode struct {
 	Author struct {
 		Login string `json:"login"`
 	} `json:"author"`
-	State            string `json:"state"`
-	Merged           bool   `json:"merged"`
-	IsDraft          bool   `json:"isDraft"`
-	CreatedAt        githubTime
-	UpdatedAt        githubTime
-	ClosedAt         githubTime
-	MergedAt         githubTime
+	State          string `json:"state"`
+	Merged         bool   `json:"merged"`
+	IsDraft        bool   `json:"isDraft"`
+	CreatedAt      githubTime
+	UpdatedAt      githubTime
+	ClosedAt       githubTime
+	MergedAt       githubTime
+	HeadRepository struct {
+		NameWithOwner string `json:"nameWithOwner"`
+	} `json:"headRepository"`
 	HeadRefName      string `json:"headRefName"`
 	HeadRefOid       string `json:"headRefOid"`
 	BaseRefName      string `json:"baseRefName"`

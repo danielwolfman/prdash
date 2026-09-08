@@ -52,6 +52,8 @@ type LoadEvent struct {
 }
 
 type Dashboard struct {
+	HideOwner       bool
+	EventsDisabled  bool
 	User            string
 	SnapshotAt      time.Time
 	Rows            []Row
@@ -69,6 +71,7 @@ type Dashboard struct {
 }
 
 type Row struct {
+	group        rowGroup
 	PR           model.PullRequest
 	Runs         []model.WorkflowRun
 	FetchError   string

@@ -17,6 +17,7 @@ type PullRequest struct {
 	UpdatedAt        time.Time
 	ClosedAt         time.Time
 	MergedAt         time.Time
+	HeadRepoFullName string
 	HeadRefName      string
 	HeadSHA          string
 	BaseRefName      string

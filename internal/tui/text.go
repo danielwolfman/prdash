@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
@@ -15,45 +16,18 @@ func fitPlain(value string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	runes := []rune(value)
-	if len(runes) <= width {
-		return value
-	}
-	if width <= 1 {
-		return "…"
-	}
-	return string(runes[:width-1]) + "…"
+	return ansi.Truncate(value, width, "…")
 }
 
 func fitANSI(value string, width int) string {
 	if lipgloss.Width(value) <= width {
 		return value
 	}
-	plain := stripANSI(value)
-	return fitPlain(plain, width)
+	return ansi.Truncate(value, max(0, width), "…")
 }
 
 func stripANSI(value string) string {
 	return ansiPattern.ReplaceAllString(value, "")
-}
-
-func abbreviate(value string) string {
-	replacer := strings.NewReplacer(
-		"integration", "integ",
-		"application", "app",
-		"javascript", "js",
-		"typescript", "ts",
-		"windows", "win",
-		"ubuntu", "ubu",
-		"macos", "mac",
-		"build", "bld",
-		"test", "tst",
-		"checks", "chk",
-	)
-	value = strings.ToLower(strings.TrimSpace(value))
-	value = strings.ReplaceAll(value, "_", "-")
-	value = replacer.Replace(value)
-	return value
 }
 
 func relativeTime(then, now time.Time) string {

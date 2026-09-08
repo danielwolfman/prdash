@@ -24,7 +24,6 @@ type styles struct {
 	error          lipgloss.Style
 	stale          lipgloss.Style
 	confirm        lipgloss.Style
-	greenBox       lipgloss.Style
 }
 
 func newStyles() styles {
@@ -47,7 +46,6 @@ func newStyles() styles {
 		error:          lipgloss.NewStyle().Foreground(lipgloss.Color("196")),
 		stale:          lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
 		confirm:        lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("94")).Bold(true),
-		greenBox:       lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("42")).Padding(0, 1),
 	}
 }
 

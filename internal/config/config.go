@@ -48,6 +48,7 @@ type LimitsConfig struct {
 }
 
 type UIConfig struct {
+	HideOwner    bool   `toml:"hide_owner"`
 	Theme        string `toml:"theme"`
 	Density      string `toml:"density"`
 	Animations   bool   `toml:"animations"`

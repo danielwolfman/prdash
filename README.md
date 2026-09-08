@@ -265,3 +265,11 @@ go run ./cmd/prdash watch --limit 3
 The default command opens the TUI immediately, discovers authored open PRs, then fills in current GitHub Actions jobs as background workers complete. It refreshes on a conservative interval derived from the configured rate budget, marks stale rows, and highlights status changes. Press `j`/`k` or arrows to move across PRs and visible jobs, `o` to open the selected PR or job in Chrome/browser, and `q` to quit. Use `--limit 3` for a faster local smoke test.
 
 Rerun actions are disabled by default. Use `--allow-rerun` for one run, or set `[actions].allow_rerun = true` in the config. Press `r` on a selected PR to rerun failed jobs for completed workflow runs, then confirm with `Enter`/`y` or cancel with `Esc`/`n`. Runs that are still queued or in progress are not rerun. A successful rerun request wakes the loader immediately instead of waiting for the next scheduled refresh.
+
+### Layout
+
+Set `[ui] hide_owner = true` to display `repo#123` instead of `owner/repo#123` in PR panes. The default is `false`. Each pane shows the target and PR branches. Job names use the available terminal width, with status and duration aligned on the right. Names retain their original spelling and are truncated only when needed.
+
+Native GitHub stacks and visible PRs connected by head/base branches share a colored border and appear in dependency order, base first. Connected stacks stay together; groups are placed by their most recently updated member. Stack labels count visible PRs (closed or filtered PRs are not added). Fork branches are matched by repository identity as well as branch name.
+
+For a second preview instance, use `prdash --config /path/to/preview.toml` with `[hooks] enabled = false` and a separate `state_path`. Use a separate `[logging] path` too. The header shows `events off`; the existing monitor keeps its event state and lock.

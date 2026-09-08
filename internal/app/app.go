@@ -48,11 +48,21 @@ func New() *cobra.Command {
 				"version": Version,
 				"commit":  Commit,
 			})
+			path, err := config.ResolvePath(configPath)
+			if err != nil {
+				return err
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				return err
+			}
 			dashboard := tui.Dashboard{
+				HideOwner:      cfg.UI.HideOwner,
+				EventsDisabled: !cfg.Hooks.Enabled,
 				SnapshotAt:     time.Now(),
-				Symbols:        "auto",
-				Animations:     true,
-				AnimationFPS:   6,
+				Symbols:        cfg.UI.Symbols,
+				Animations:     cfg.UI.Animations,
+				AnimationFPS:   cfg.UI.AnimationFPS,
 				Loader:         dashboardLoader(configPath, limitOverride, logger),
 				ActionExecutor: actionExecutor(configPath, allowRerun, logger),
 				ActionsEnabled: actionsEnabled(configPath, allowRerun),

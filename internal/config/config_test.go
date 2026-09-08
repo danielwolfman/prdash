@@ -154,6 +154,7 @@ func TestAddAndRemoveIncludedAuthor(t *testing.T) {
 func TestSaveCreatesParentDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.toml")
 	cfg := Default()
+	cfg.UI.HideOwner = true
 	cfg.Filters.ExcludeRepos = []string{"octo-org/prdash"}
 
 	if err := Save(path, cfg); err != nil {
@@ -162,6 +163,9 @@ func TestSaveCreatesParentDirectory(t *testing.T) {
 	loaded, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !loaded.UI.HideOwner {
+		t.Fatal("hide_owner did not round trip")
 	}
 	if len(loaded.Filters.ExcludeRepos) != 1 || loaded.Filters.ExcludeRepos[0] != "octo-org/prdash" {
 		t.Fatalf("loaded exclude repos = %#v", loaded.Filters.ExcludeRepos)
