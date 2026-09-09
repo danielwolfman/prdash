@@ -949,3 +949,127 @@ func testPR() model.PullRequest {
 		BaseRefName:  "main",
 	}
 }
+
+func TestReviewDeliveryRetriesAfterRestartOutsideRecentWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	d, _ := testDispatcherAt(t, path)
+	pr := testPR()
+	d.ObserveActivities(context.Background(), pr, nil)
+	d.execute = func(context.Context, config.HookCommandConfig, Payload) error {
+		return context.DeadlineExceeded
+	}
+	activity := model.PullRequestActivity{ID: "PRR_FRED", Kind: model.ActivityPullRequestReview, Author: "frederickbot", State: "COMMENTED", BodyText: "readable-structure review"}
+	d.ObserveActivities(context.Background(), pr, []model.PullRequestActivity{activity})
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, calls := testDispatcherAt(t, path)
+	// GitHub no longer returns this review, but its delivery must still be retried.
+	restarted.ObserveActivities(context.Background(), pr, nil)
+	got := calls.collect(t, 1)[0]
+	if got.Activity == nil || got.Activity.ID != activity.ID || got.Activity.BodyText != activity.BodyText {
+		t.Fatalf("lost review: %#v", got)
+	}
+	restarted.dispatchWG.Wait()
+	restarted.ObserveActivities(context.Background(), pr, []model.PullRequestActivity{activity})
+	calls.assertNoMore(t)
+	if err := restarted.Close(); err != nil {
+		t.Fatal(err)
+	}
+	acked, ackedCalls := testDispatcherAt(t, path)
+	acked.ObserveActivities(context.Background(), pr, nil)
+	ackedCalls.assertNoMore(t)
+}
+
+func TestReviewDeliveryDoesNotDuplicateInFlightHook(t *testing.T) {
+	d, _ := testDispatcher(t)
+	pr := testPR()
+	d.ObserveActivities(context.Background(), pr, nil)
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	d.execute = func(context.Context, config.HookCommandConfig, Payload) error {
+		started <- struct{}{}
+		<-release
+		return nil
+	}
+	activity := []model.PullRequestActivity{{ID: "PRR_FRED", Kind: model.ActivityPullRequestReview}}
+	d.ObserveActivities(context.Background(), pr, activity)
+	<-started
+	d.ObserveActivities(context.Background(), pr, activity)
+	close(release)
+	d.dispatchWG.Wait()
+	select {
+	case <-started:
+		t.Fatal("duplicate in-flight hook")
+	default:
+	}
+}
+
+func TestReviewDeliveryWaitsForEveryConfiguredHook(t *testing.T) {
+	d, _ := testDispatcher(t)
+	d.commands = []config.HookCommandConfig{
+		{Event: EventNewPRActivity, Command: []string{"first"}},
+		{Event: EventNewPRActivity, Command: []string{"second"}},
+	}
+	pr := testPR()
+	d.ObserveActivities(context.Background(), pr, nil)
+	attempts := map[string]int{}
+	d.execute = func(_ context.Context, command config.HookCommandConfig, _ Payload) error {
+		name := command.Command[0]
+		attempts[name]++
+		if name == "second" && attempts[name] == 1 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	d.ObserveActivities(context.Background(), pr, []model.PullRequestActivity{{ID: "R", Kind: model.ActivityPullRequestReview}})
+	d.dispatchWG.Wait()
+	d.ObserveActivities(context.Background(), pr, nil)
+	d.dispatchWG.Wait()
+	if attempts["second"] != 2 {
+		t.Fatalf("attempts: %v", attempts)
+	}
+	d.ObserveActivities(context.Background(), pr, nil)
+	d.dispatchWG.Wait()
+	if attempts["second"] != 2 {
+		t.Fatalf("already delivered: %v", attempts)
+	}
+}
+
+func TestReviewDeliveryRequiresPersistedPendingPayload(t *testing.T) {
+	d, calls := testDispatcher(t)
+	pr := testPR()
+	d.ObserveActivities(context.Background(), pr, nil)
+	path := d.statePath
+	d.statePath = t.TempDir() // An existing directory cannot be replaced with a state file.
+	activity := []model.PullRequestActivity{{ID: "R", Kind: model.ActivityPullRequestReview}}
+	d.ObserveActivities(context.Background(), pr, activity)
+	calls.assertNoMore(t)
+	if _, seen := d.state.PRActivities[activityStateKey(pr)].Seen["R"]; seen {
+		t.Fatal("failed persistence marked review as seen")
+	}
+	d.statePath = path
+	d.ObserveActivities(context.Background(), pr, activity)
+	calls.collect(t, 1)
+}
+
+func TestReviewDeliverySurvivesCancellationBeforeDispatch(t *testing.T) {
+	d, calls := testDispatcher(t)
+	pr := testPR()
+	d.ObserveActivities(context.Background(), pr, nil)
+	for i := 0; i < cap(d.dispatchSlots); i++ {
+		d.dispatchSlots <- struct{}{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d.ObserveActivities(ctx, pr, []model.PullRequestActivity{{ID: "R", Kind: model.ActivityPullRequestReview}})
+	for i := 0; i < cap(d.dispatchSlots); i++ {
+		<-d.dispatchSlots
+	}
+	d.ObserveActivities(context.Background(), pr, nil)
+	got := calls.collect(t, 1)[0]
+	if got.Activity.ID != "R" {
+		t.Fatalf("wrong retry: %#v", got.Activity)
+	}
+}

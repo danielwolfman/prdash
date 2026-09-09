@@ -68,7 +68,8 @@ type Dispatcher struct {
 	// discovered is intentionally process-local. Re-emitting pr_discovered once
 	// per process lets idempotent hook consumers repair missing external state
 	// after prdash or the consumer was reinstalled.
-	discovered map[string]struct{}
+	discovered       map[string]struct{}
+	activityInFlight map[string]bool
 }
 
 type Payload struct {
@@ -205,9 +206,10 @@ type headState struct {
 }
 
 type activityState struct {
-	Initialized bool              `json:"initialized,omitempty"`
-	Seen        map[string]string `json:"seen,omitempty"`
-	UpdatedAt   string            `json:"updated_at,omitempty"`
+	Pending     map[string]Payload `json:"pending,omitempty"`
+	Initialized bool               `json:"initialized,omitempty"`
+	Seen        map[string]string  `json:"seen,omitempty"`
+	UpdatedAt   string             `json:"updated_at,omitempty"`
 }
 
 type lifecycleState struct {
@@ -256,7 +258,8 @@ func NewDispatcher(cfg config.Config, logger Logger) (*Dispatcher, error) {
 			PRReviewThreads: map[string]activityState{},
 			PRLifecycles:    map[string]lifecycleState{},
 		},
-		discovered: map[string]struct{}{},
+		discovered:       map[string]struct{}{},
+		activityInFlight: map[string]bool{},
 	}
 	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
 		return nil, err
@@ -464,30 +467,18 @@ func (d *Dispatcher) ObserveActivities(ctx context.Context, pr model.PullRequest
 	key := activityStateKey(pr)
 	now := d.now().UTC()
 
-	var payloads []Payload
 	d.mu.Lock()
-	state := d.state.PRActivities[key]
+	previous, existed := d.state.PRActivities[key]
+	state := previous
+	state.Seen = maps.Clone(previous.Seen)
+	state.Pending = maps.Clone(previous.Pending)
 	if state.Seen == nil {
 		state.Seen = map[string]string{}
 	}
-	if !state.Initialized {
-		for _, activity := range activities {
-			if activity.ID != "" {
-				state.Seen[activity.ID] = string(activity.Kind)
-			}
-		}
-		state.Initialized = true
-		state.UpdatedAt = now.Format(time.RFC3339Nano)
-		d.state.PRActivities[key] = state
-		if err := d.saveStateLocked(); err != nil && d.logger != nil {
-			d.logger.Error("hook_state_save_error", map[string]any{
-				"state_path": d.statePath,
-				"error":      err.Error(),
-			})
-		}
-		d.mu.Unlock()
-		return
+	if state.Pending == nil {
+		state.Pending = map[string]Payload{}
 	}
+	changed := !state.Initialized
 	for _, activity := range activities {
 		if activity.ID == "" {
 			continue
@@ -496,23 +487,83 @@ func (d *Dispatcher) ObserveActivities(ctx context.Context, pr model.PullRequest
 			continue
 		}
 		state.Seen[activity.ID] = string(activity.Kind)
-		payloads = append(payloads, d.activityPayload(EventNewPRActivity, now, pr, activity))
-	}
-	state.UpdatedAt = now.Format(time.RFC3339Nano)
-	d.state.PRActivities[key] = state
-	if len(payloads) > 0 {
-		if err := d.saveStateLocked(); err != nil && d.logger != nil {
-			d.logger.Error("hook_state_save_error", map[string]any{
-				"state_path": d.statePath,
-				"error":      err.Error(),
-			})
+		changed = true
+		if state.Initialized {
+			state.Pending[activity.ID] = d.activityPayload(EventNewPRActivity, now, pr, activity)
 		}
 	}
+	state.Initialized = true
+	if changed {
+		state.UpdatedAt = now.Format(time.RFC3339Nano)
+		d.state.PRActivities[key] = state
+		if err := d.saveStateLocked(); err != nil {
+			if existed {
+				d.state.PRActivities[key] = previous
+			} else {
+				delete(d.state.PRActivities, key)
+			}
+			if d.logger != nil {
+				d.logger.Error("hook_state_save_error", map[string]any{"state_path": d.statePath, "error": err.Error()})
+			}
+			d.mu.Unlock()
+			return
+		}
+	}
+	pending := maps.Clone(state.Pending)
 	d.mu.Unlock()
 
-	for _, payload := range payloads {
-		d.dispatch(ctx, payload)
+	// Keep payloads until delivery succeeds, even if they leave GitHub's recent-activity window.
+	for _, payload := range pending {
+		d.dispatchActivity(ctx, key, payload)
 	}
+}
+
+func (d *Dispatcher) dispatchActivity(ctx context.Context, key string, payload Payload) {
+	id := payload.Activity.ID
+	flightKey := key + ":" + id
+	d.mu.Lock()
+	_, pending := d.state.PRActivities[key].Pending[id]
+	if !pending || d.activityInFlight[flightKey] {
+		d.mu.Unlock()
+		return
+	}
+	d.activityInFlight[flightKey] = true
+	d.mu.Unlock()
+	select {
+	case d.dispatchSlots <- struct{}{}:
+	case <-ctx.Done():
+		d.mu.Lock()
+		delete(d.activityInFlight, flightKey)
+		d.mu.Unlock()
+		return
+	}
+	d.dispatchWG.Add(1)
+	go func() {
+		defer d.dispatchWG.Done()
+		defer func() { <-d.dispatchSlots }()
+		defer func() {
+			d.mu.Lock()
+			delete(d.activityInFlight, flightKey)
+			d.mu.Unlock()
+		}()
+		for _, command := range d.commands {
+			if command.Event == payload.Event {
+				if err := d.executeHook(ctx, command, payload); err != nil {
+					return
+				}
+			}
+		}
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		state := d.state.PRActivities[key]
+		delete(state.Pending, id)
+		if err := d.saveStateLocked(); err != nil {
+			state.Pending[id] = payload
+			if d.logger != nil {
+				d.logger.Error("hook_state_save_error", map[string]any{"state_path": d.statePath, "error": err.Error()})
+			}
+		}
+	}()
 }
 
 func (d *Dispatcher) ObserveReviewThreads(ctx context.Context, pr model.PullRequest, threads []model.PullRequestReviewThread) {
@@ -725,39 +776,44 @@ func (d *Dispatcher) dispatch(ctx context.Context, payload Payload) {
 		go func() {
 			defer d.dispatchWG.Done()
 			defer func() { <-d.dispatchSlots }()
-			if d.logger != nil {
-				d.logger.Info("hook_dispatch_start", map[string]any{
-					"event":     payload.Event,
-					"repo":      payload.PR.RepoFullName,
-					"pr_number": payload.PR.Number,
-					"head_sha":  payload.PR.HeadSHA,
-					"command":   firstCommandWord(command.Command),
-				})
-			}
-			if err := d.execute(ctx, command, payload); err != nil {
-				if d.logger != nil {
-					d.logger.Error("hook_dispatch_error", map[string]any{
-						"event":     payload.Event,
-						"repo":      payload.PR.RepoFullName,
-						"pr_number": payload.PR.Number,
-						"head_sha":  payload.PR.HeadSHA,
-						"command":   firstCommandWord(command.Command),
-						"error":     err.Error(),
-					})
-				}
-				return
-			}
-			if d.logger != nil {
-				d.logger.Info("hook_dispatch_success", map[string]any{
-					"event":     payload.Event,
-					"repo":      payload.PR.RepoFullName,
-					"pr_number": payload.PR.Number,
-					"head_sha":  payload.PR.HeadSHA,
-					"command":   firstCommandWord(command.Command),
-				})
-			}
+			_ = d.executeHook(ctx, command, payload)
 		}()
 	}
+}
+
+func (d *Dispatcher) executeHook(ctx context.Context, command config.HookCommandConfig, payload Payload) error {
+	if d.logger != nil {
+		d.logger.Info("hook_dispatch_start", map[string]any{
+			"event":     payload.Event,
+			"repo":      payload.PR.RepoFullName,
+			"pr_number": payload.PR.Number,
+			"head_sha":  payload.PR.HeadSHA,
+			"command":   firstCommandWord(command.Command),
+		})
+	}
+	if err := d.execute(ctx, command, payload); err != nil {
+		if d.logger != nil {
+			d.logger.Error("hook_dispatch_error", map[string]any{
+				"event":     payload.Event,
+				"repo":      payload.PR.RepoFullName,
+				"pr_number": payload.PR.Number,
+				"head_sha":  payload.PR.HeadSHA,
+				"command":   firstCommandWord(command.Command),
+				"error":     err.Error(),
+			})
+		}
+		return err
+	}
+	if d.logger != nil {
+		d.logger.Info("hook_dispatch_success", map[string]any{
+			"event":     payload.Event,
+			"repo":      payload.PR.RepoFullName,
+			"pr_number": payload.PR.Number,
+			"head_sha":  payload.PR.HeadSHA,
+			"command":   firstCommandWord(command.Command),
+		})
+	}
+	return nil
 }
 
 func (d *Dispatcher) payload(event string, observedAt time.Time, pr model.PullRequest, runs []model.WorkflowRun, summary model.CheckSummary) Payload {
@@ -989,7 +1045,20 @@ func (d *Dispatcher) saveStateLocked() error {
 	if err := os.MkdirAll(filepath.Dir(d.statePath), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(d.statePath, data, 0o600)
+	// A crash during a write must not truncate the seen/pending delivery state.
+	temporary, err := os.CreateTemp(filepath.Dir(d.statePath), ".hooks-state-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(temporary.Name())
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporary.Name(), d.statePath)
 }
 
 func stateKey(pr model.PullRequest) string {
