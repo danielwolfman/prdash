@@ -301,9 +301,10 @@ func TestMouseWheelScrollsByRenderedLines(t *testing.T) {
 	}
 }
 
-func TestRerunFailedJobsPlanningAndConfirmation(t *testing.T) {
+func TestRerunFailedJobsPlanningAndConfirmationWithEventsDisabled(t *testing.T) {
 	dashboard := sampleDashboard("unicode")
 	dashboard.ActionsEnabled = true
+	dashboard.EventsDisabled = true
 	var captured ActionRequest
 	dashboard.ActionExecutor = func(ctx context.Context, request ActionRequest) ActionResult {
 		captured = request
@@ -395,6 +396,9 @@ func TestRerunDisabledDoesNotOpenConfirmation(t *testing.T) {
 	}
 	if !strings.Contains(m.actionText, "disabled") {
 		t.Fatalf("expected disabled action text, got %q", m.actionText)
+	}
+	if !strings.Contains(m.actionText, "--allow-rerun") {
+		t.Fatalf("expected instructions to enable reruns, got %q", m.actionText)
 	}
 }
 

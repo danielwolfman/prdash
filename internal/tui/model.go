@@ -653,7 +653,7 @@ func (m Model) updateConfirmation(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) planRerunFailedJobs() {
 	if !m.dashboard.ActionsEnabled || m.dashboard.ActionExecutor == nil {
-		m.actionText = "rerun disabled"
+		m.actionText = "rerun disabled; restart with --allow-rerun"
 		return
 	}
 	if m.actionBusy {

@@ -266,6 +266,19 @@ The default command opens the TUI immediately, discovers authored open PRs, then
 
 Rerun actions are disabled by default. Use `--allow-rerun` for one run, or set `[actions].allow_rerun = true` in the config. Press `r` on a selected PR to rerun failed jobs for completed workflow runs, then confirm with `Enter`/`y` or cancel with `Esc`/`n`. Runs that are still queued or in progress are not rerun. A successful rerun request wakes the loader immediately instead of waiting for the next scheduled refresh.
 
+Event hooks and manual reruns are independent. A local dashboard can show `events off` and still rerun failed jobs with this configuration:
+
+```toml
+[hooks]
+enabled = false
+
+[actions]
+allow_rerun = true
+confirm_rerun = true
+```
+
+For an existing profile, run `prdash --config /path/to/profile.toml config rerun enable`, then restart that dashboard. This preserves its event-hook setting.
+
 ### Layout
 
 Set `[ui] hide_owner = true` to display `repo#123` instead of `owner/repo#123` in PR panes. The default is `false`. Each pane shows the target and PR branches. Job names use the available terminal width, with status and duration aligned on the right. Names retain their original spelling and are truncated only when needed.
